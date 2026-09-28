@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+    <meta charset="UTF-8">
+    <title>약 정보 검색</title>
+</head>
+
+<body>
+
+    <h1>💊 약 정보 검색</h1>
+
+    <form action="/" method="POST">
+
+        <input
+            type="text"
+            name="medicine_name"
+            placeholder="약 이름을 입력하세요"
+        >
+
+        <button type="submit">검색</button>
+
+    </form>
+
+
+    {% if medicine_name %}
+
+        <h2>검색어</h2>
+        <p>{{ medicine_name }}</p>
+
+    {% endif %}
+
+
+    {% if result %}
+
+        <h2>API 결과</h2>
+
+        <pre>{{ result }}</pre>
+
+    {% endif %}
+
+</body>
+
+</html>
