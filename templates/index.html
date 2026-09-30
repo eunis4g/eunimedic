@@ -16,6 +16,7 @@
             type="text"
             name="medicine_name"
             placeholder="약 이름을 입력하세요"
+            value="{{ medicine_name }}"
         >
 
         <button type="submit">검색</button>
@@ -28,14 +29,37 @@
         <h2>검색어</h2>
         <p>{{ medicine_name }}</p>
 
-    {% endif %}
+        <h2>검색 결과</h2>
 
+        {% if medicines %}
 
-    {% if result %}
+            {% for medicine in medicines %}
 
-        <h2>API 결과</h2>
+                <div>
+                    <h3>
+                        <a href="/medicine/{{ medicine.item_seq }}">
+                            {{ medicine.item_name }}</h3>
+                        </a>
+                    </h3>
 
-        <pre>{{ result }}</pre>
+                    <p>
+                        품목기준코드: {{ medicine.item_seq }}
+                    </p>
+
+                    <p>
+                        제조사: {{ medicine.entp_name }}
+                    </p>
+
+                    <hr>
+                </div>
+
+            {% endfor %}
+
+        {% else %}
+
+            <p>검색 결과가 없습니다.</p>
+
+        {% endif %}
 
     {% endif %}
 
