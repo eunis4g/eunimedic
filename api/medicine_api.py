@@ -10,6 +10,8 @@ load_dotenv()
 API_KEY = os.getenv("API_KEY")
 
 API_URL = "https://apis.data.go.kr/1471000/DrugPrdtPrmsnInfoService08/getDrugPrdtPrmsnInq08"
+DETAIL_API_URL = "https://apis.data.go.kr/1471000/DrugPrdtPrmsnInfoService08/getDrugPrdtPrmsnDtlInq08"
+INGREDIENT_API_URL = "https://apis.data.go.kr/1471000/DrugPrdtPrmsnInfoService08/getDrugPrdtMcpnDtlInq08"
 
 
 def search_medicine(medicine_name):
@@ -51,3 +53,107 @@ def parse_medicine_response(response):
         medicines.append(medicine)
 
     return medicines
+
+
+def get_medicine_detail(item_seq):
+
+    params = {
+        "serviceKey": API_KEY,
+        "pageNo": "1",
+        "numOfRows": "1",
+        "type": "xml",
+        "item_seq": item_seq
+    }
+
+    response = requests.get(DETAIL_API_URL, params=params)
+
+    return response
+
+
+def _extract_text(element):
+
+    if element is None:
+        return ""
+
+    text_parts = []
+
+    for text in element.itertext():
+        cleaned_text = text.strip()
+
+        if cleaned_text:
+            text_parts.append(cleaned_text)
+
+    return " ".join(text_parts)
+
+
+def parse_medicine_detail_response(response):
+
+    root = ET.fromstring(response.text)
+
+    total_count = root.findtext("./body/totalCount")
+
+    if total_count == "0":
+        return None
+
+    item = root.find("./body/items/item")
+
+    if item is None:
+        return None
+
+    medicine = {
+        "item_seq": item.findtext("ITEM_SEQ"),
+        "item_name": item.findtext("ITEM_NAME"),
+        "entp_name": item.findtext("ENTP_NAME"),
+        "item_permit_date": item.findtext("ITEM_PERMIT_DATE"),
+        "etc_otc_code": item.findtext("ETC_OTC_CODE"),
+        "chart": item.findtext("CHART"),
+        "material_name": item.findtext("MATERIAL_NAME"),
+        "ee_doc_data": _extract_text(item.find("EE_DOC_DATA")),
+        "ud_doc_data": _extract_text(item.find("UD_DOC_DATA")),
+        "nb_doc_data": _extract_text(item.find("NB_DOC_DATA")),
+        "storage_method": item.findtext("STORAGE_METHOD"),
+        "valid_term": item.findtext("VALID_TERM"),
+        "pack_unit": item.findtext("PACK_UNIT"),
+    }
+
+    return medicine
+
+
+def get_medicine_ingredients(item_seq):
+
+    params = {
+        "serviceKey": API_KEY,
+        "pageNo": "1",
+        "numOfRows": "100",
+        "type": "xml",
+        "Item_seq": item_seq
+    }
+
+    response = requests.get(INGREDIENT_API_URL, params=params)
+
+    return response
+
+
+def parse_medicine_ingredient_response(response):
+
+    root = ET.fromstring(response.text)
+
+    total_count = root.findtext("./body/totalCount")
+
+    if total_count == "0":
+        return []
+
+    ingredients = []
+
+    items = root.findall("./body/items/item")
+
+    for item in items:
+
+        ingredient = {}
+
+        for element in item:
+            ingredient[element.tag.lower()] = _extract_text(element)
+
+        ingredients.append(ingredient)
+
+    return ingredients

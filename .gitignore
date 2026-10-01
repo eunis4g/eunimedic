@@ -1,4 +1,7 @@
 secret.py
 .env
-medicine,db
+medicine.db
 __pycache__/
+*.pyc
+.venv/
+venv/

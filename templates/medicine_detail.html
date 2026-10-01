@@ -10,9 +10,81 @@
 
     <h1>💊 의약품 상세정보</h1>
 
-    <p>선택한 약의 ITEM_SEQ:</p>
+    {% if medicine %}
 
-    <h2>{{ item_seq }}</h2>
+        <h2>{{ medicine.item_name }}</h2>
+
+        <p>품목기준코드: {{ medicine.item_seq }}</p>
+        <p>업체명: {{ medicine.entp_name }}</p>
+        <p>허가일자: {{ medicine.item_permit_date }}</p>
+        <p>전문·일반의약품 구분: {{ medicine.etc_otc_code }}</p>
+
+        {% if medicine.chart %}
+            <h3>성상</h3>
+            <p>{{ medicine.chart }}</p>
+        {% endif %}
+
+        {% if medicine.material_name %}
+            <h3>원료약품 및 분량</h3>
+            <p>{{ medicine.material_name }}</p>
+        {% endif %}
+
+        {% if medicine.ee_doc_data %}
+            <h3>효능·효과</h3>
+            <p>{{ medicine.ee_doc_data }}</p>
+        {% endif %}
+
+        {% if medicine.ud_doc_data %}
+            <h3>용법·용량</h3>
+            <p>{{ medicine.ud_doc_data }}</p>
+        {% endif %}
+
+        {% if medicine.nb_doc_data %}
+            <h3>사용상의 주의사항</h3>
+            <p>{{ medicine.nb_doc_data }}</p>
+        {% endif %}
+
+        {% if medicine.storage_method %}
+            <h3>저장방법</h3>
+            <p>{{ medicine.storage_method }}</p>
+        {% endif %}
+
+        {% if medicine.valid_term %}
+            <h3>유효기간</h3>
+            <p>{{ medicine.valid_term }}</p>
+        {% endif %}
+
+        {% if medicine.pack_unit %}
+            <h3>포장단위</h3>
+            <p>{{ medicine.pack_unit }}</p>
+        {% endif %}
+
+    {% else %}
+
+        <p>품목기준코드 {{ item_seq }}에 해당하는 상세정보를 찾을 수 없습니다.</p>
+
+    {% endif %}
+
+    <h2>주성분 정보</h2>
+
+    {% if ingredients %}
+
+        {% for ingredient in ingredients %}
+
+            <div>
+                <p>성분명: {{ ingredient.mtral_nm }}</p>
+                <p>함량: {{ ingredient.qnt }}</p>
+                <p>단위: {{ ingredient.ingd_unit_cd }}</p>
+                <hr>
+            </div>
+
+        {% endfor %}
+
+    {% else %}
+
+        <p>주성분 정보가 없습니다.</p>
+
+    {% endif %}
 
     <a href="/">← 검색으로 돌아가기</a>
 
