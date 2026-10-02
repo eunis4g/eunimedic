@@ -12,6 +12,7 @@ API_KEY = os.getenv("API_KEY")
 API_URL = "https://apis.data.go.kr/1471000/DrugPrdtPrmsnInfoService08/getDrugPrdtPrmsnInq08"
 DETAIL_API_URL = "https://apis.data.go.kr/1471000/DrugPrdtPrmsnInfoService08/getDrugPrdtPrmsnDtlInq08"
 INGREDIENT_API_URL = "https://apis.data.go.kr/1471000/DrugPrdtPrmsnInfoService08/getDrugPrdtMcpnDtlInq08"
+EASY_DRUG_API_URL = "https://apis.data.go.kr/1471000/DrbEasyDrugInfoService/getDrbEasyDrugList"
 
 
 def search_medicine(medicine_name):
@@ -157,3 +158,51 @@ def parse_medicine_ingredient_response(response):
         ingredients.append(ingredient)
 
     return ingredients
+
+
+def get_easy_drug_info(item_seq):
+
+    params = {
+        "ServiceKey": API_KEY,
+        "pageNo": "1",
+        "numOfRows": "1",
+        "type": "xml",
+        "itemSeq": item_seq
+    }
+
+    response = requests.get(EASY_DRUG_API_URL, params=params)
+
+    return response
+
+
+def parse_easy_drug_response(response):
+
+    root = ET.fromstring(response.text)
+
+    total_count = root.findtext("./body/totalCount")
+
+    if total_count == "0":
+        return None
+
+    item = root.find("./body/items/item")
+
+    if item is None:
+        return None
+
+    easy_drug_info = {
+        "item_seq": _extract_text(item.find("itemSeq")),
+        "item_name": _extract_text(item.find("itemName")),
+        "entp_name": _extract_text(item.find("entpName")),
+        "efficacy": _extract_text(item.find("efcyQesitm")),
+        "use_method": _extract_text(item.find("useMethodQesitm")),
+        "warning": _extract_text(item.find("atpnWarnQesitm")),
+        "precautions": _extract_text(item.find("atpnQesitm")),
+        "interactions": _extract_text(item.find("intrcQesitm")),
+        "side_effects": _extract_text(item.find("seQesitm")),
+        "storage_method": _extract_text(item.find("depositMethodQesitm")),
+        "item_image": _extract_text(item.find("itemImage")),
+        "open_date": _extract_text(item.find("openDe")),
+        "update_date": _extract_text(item.find("updateDe")),
+    }
+
+    return easy_drug_info

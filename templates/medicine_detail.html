@@ -65,6 +65,51 @@
 
     {% endif %}
 
+    <h2>e약은요 복약안내</h2>
+
+    {% if easy_drug_info %}
+
+        {% if easy_drug_info.efficacy %}
+            <h3>효능·효과</h3>
+            <p>{{ easy_drug_info.efficacy }}</p>
+        {% endif %}
+
+        {% if easy_drug_info.use_method %}
+            <h3>복용 방법</h3>
+            <p>{{ easy_drug_info.use_method }}</p>
+        {% endif %}
+
+        {% if easy_drug_info.warning %}
+            <h3>복용 전 경고</h3>
+            <p>{{ easy_drug_info.warning }}</p>
+        {% endif %}
+
+        {% if easy_drug_info.precautions %}
+            <h3>주의사항</h3>
+            <p>{{ easy_drug_info.precautions }}</p>
+        {% endif %}
+
+        {% if easy_drug_info.interactions %}
+            <h3>약·음식 상호작용</h3>
+            <p>{{ easy_drug_info.interactions }}</p>
+        {% endif %}
+
+        {% if easy_drug_info.side_effects %}
+            <h3>부작용·이상반응</h3>
+            <p>{{ easy_drug_info.side_effects }}</p>
+        {% endif %}
+
+        {% if easy_drug_info.storage_method %}
+            <h3>보관 방법</h3>
+            <p>{{ easy_drug_info.storage_method }}</p>
+        {% endif %}
+
+    {% else %}
+
+        <p>e약은요 정보가 없습니다.</p>
+
+    {% endif %}
+
     <h2>주성분 정보</h2>
 
     {% if ingredients %}

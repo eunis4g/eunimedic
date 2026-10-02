@@ -7,6 +7,8 @@ from api.medicine_api import (
     parse_medicine_detail_response,
     get_medicine_ingredients,
     parse_medicine_ingredient_response,
+    get_easy_drug_info,
+    parse_easy_drug_response,
 )
 
 
@@ -68,11 +70,18 @@ def medicine_detail(item_seq):
     print("주성분 파싱 결과")
     print(ingredients)
 
+    easy_drug_response = get_easy_drug_info(item_seq)
+
+    print("e약은요 상태 코드:", easy_drug_response.status_code)
+
+    easy_drug_info = parse_easy_drug_response(easy_drug_response)
+
     return render_template(
         "medicine_detail.html",
         item_seq=item_seq,
         medicine=medicine,
-        ingredients=ingredients
+        ingredients=ingredients,
+        easy_drug_info=easy_drug_info
     )
 
 if __name__ == "__main__":
