@@ -4,6 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <title>의약품 상세정보</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
 
 <body>
@@ -31,17 +32,17 @@
 
         {% if medicine.ee_doc_data %}
             <h3>효능·효과</h3>
-            <p>{{ medicine.ee_doc_data }}</p>
+            <div>{{ medicine.ee_doc_data | sanitize_html }}</div>
         {% endif %}
 
         {% if medicine.ud_doc_data %}
             <h3>용법·용량</h3>
-            <p>{{ medicine.ud_doc_data }}</p>
+            <div>{{ medicine.ud_doc_data | sanitize_html }}</div>
         {% endif %}
 
         {% if medicine.nb_doc_data %}
             <h3>사용상의 주의사항</h3>
-            <p>{{ medicine.nb_doc_data }}</p>
+            <div>{{ medicine.nb_doc_data | sanitize_html }}</div>
         {% endif %}
 
         {% if medicine.storage_method %}
@@ -71,37 +72,37 @@
 
         {% if easy_drug_info.efficacy %}
             <h3>효능·효과</h3>
-            <p>{{ easy_drug_info.efficacy }}</p>
+            <p class="easy-drug-text">{{ easy_drug_info.efficacy }}</p>
         {% endif %}
 
         {% if easy_drug_info.use_method %}
             <h3>복용 방법</h3>
-            <p>{{ easy_drug_info.use_method }}</p>
+            <p class="easy-drug-text">{{ easy_drug_info.use_method }}</p>
         {% endif %}
 
         {% if easy_drug_info.warning %}
             <h3>복용 전 경고</h3>
-            <p>{{ easy_drug_info.warning }}</p>
+            <p class="easy-drug-text">{{ easy_drug_info.warning }}</p>
         {% endif %}
 
         {% if easy_drug_info.precautions %}
             <h3>주의사항</h3>
-            <p>{{ easy_drug_info.precautions }}</p>
+            <p class="easy-drug-text">{{ easy_drug_info.precautions }}</p>
         {% endif %}
 
         {% if easy_drug_info.interactions %}
             <h3>약·음식 상호작용</h3>
-            <p>{{ easy_drug_info.interactions }}</p>
+            <p class="easy-drug-text">{{ easy_drug_info.interactions }}</p>
         {% endif %}
 
         {% if easy_drug_info.side_effects %}
             <h3>부작용·이상반응</h3>
-            <p>{{ easy_drug_info.side_effects }}</p>
+            <p class="easy-drug-text">{{ easy_drug_info.side_effects }}</p>
         {% endif %}
 
         {% if easy_drug_info.storage_method %}
             <h3>보관 방법</h3>
-            <p>{{ easy_drug_info.storage_method }}</p>
+            <p class="easy-drug-text">{{ easy_drug_info.storage_method }}</p>
         {% endif %}
 
     {% else %}

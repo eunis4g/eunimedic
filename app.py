@@ -1,4 +1,7 @@
+import nh3
+
 from flask import Flask, render_template, request
+from markupsafe import Markup
 
 from api.medicine_api import (
     search_medicine,
@@ -14,6 +17,41 @@ from api.medicine_api import (
 
 
 app = Flask(__name__)
+
+
+ALLOWED_TAGS = {
+    "p", "br", "div", "span",
+    "table", "caption", "colgroup", "col",
+    "thead", "tbody", "tfoot", "tr", "td", "th",
+    "ul", "ol", "li",
+    "strong", "b", "em", "i", "u", "sup", "sub",
+}
+
+ALLOWED_ATTRIBUTES = {
+    "td": {"colspan", "rowspan"},
+    "th": {"colspan", "rowspan", "scope"},
+    "col": {"span"},
+    "colgroup": {"span"},
+    "ol": {"start"},
+    "li": {"value"},
+}
+
+HTML_CLEANER = nh3.Cleaner(
+    tags=ALLOWED_TAGS,
+    attributes=ALLOWED_ATTRIBUTES,
+    clean_content_tags={
+        "script", "style", "iframe", "object",
+        "embed", "form", "svg", "math",
+    },
+)
+
+
+@app.template_filter("sanitize_html")
+def sanitize_html(value):
+
+    cleaned_html = HTML_CLEANER.clean(value or "")
+
+    return Markup(cleaned_html)
 
 
 @app.route("/", methods=["GET", "POST"])
