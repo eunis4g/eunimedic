@@ -1,7 +1,11 @@
+from pathlib import Path
+from uuid import uuid4
+
 import nh3
 
 from flask import Flask, render_template, request
 from markupsafe import Markup
+from werkzeug.utils import secure_filename
 
 from api.medicine_api import (
     search_medicine,
@@ -19,6 +23,15 @@ from api.medicine_api import (
 
 
 app = Flask(__name__)
+
+
+UPLOAD_FOLDER = Path(app.static_folder) / "uploads"
+ALLOWED_IMAGE_EXTENSIONS = {"jpg", "jpeg", "png"}
+ALLOWED_IMAGE_MIME_TYPES = {
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "png": "image/png",
+}
 
 
 ALLOWED_TAGS = {
@@ -87,6 +100,76 @@ def home():
         "index.html",
         medicine_name=medicine_name,
         medicines=medicines
+    )
+
+
+@app.route("/identify", methods=["POST"])
+def identify():
+
+    pill_image = request.files.get("pill_image")
+
+    if pill_image is None or pill_image.filename == "":
+        return render_template(
+            "index.html",
+            medicine_name="",
+            medicines=[],
+            upload_error="알약 사진을 선택해주세요."
+        ), 400
+
+    safe_filename = secure_filename(pill_image.filename)
+
+    if "." not in safe_filename:
+        return render_template(
+            "index.html",
+            medicine_name="",
+            medicines=[],
+            upload_error="jpg, jpeg, png 이미지 파일만 업로드할 수 있습니다."
+        ), 400
+
+    extension = safe_filename.rsplit(".", 1)[1].lower()
+
+    if extension not in ALLOWED_IMAGE_EXTENSIONS:
+        return render_template(
+            "index.html",
+            medicine_name="",
+            medicines=[],
+            upload_error="jpg, jpeg, png 이미지 파일만 업로드할 수 있습니다."
+        ), 400
+
+    if pill_image.mimetype != ALLOWED_IMAGE_MIME_TYPES[extension]:
+        return render_template(
+            "index.html",
+            medicine_name="",
+            medicines=[],
+            upload_error="jpg, jpeg, png 이미지 파일만 업로드할 수 있습니다."
+        ), 400
+
+    file_signature = pill_image.stream.read(8)
+    pill_image.stream.seek(0)
+
+    if extension in {"jpg", "jpeg"}:
+        has_valid_signature = file_signature.startswith(b"\xff\xd8\xff")
+    else:
+        has_valid_signature = file_signature == b"\x89PNG\r\n\x1a\n"
+
+    if not has_valid_signature:
+        return render_template(
+            "index.html",
+            medicine_name="",
+            medicines=[],
+            upload_error="jpg, jpeg, png 이미지 파일만 업로드할 수 있습니다."
+        ), 400
+
+    stored_filename = secure_filename(f"{uuid4().hex}.{extension}")
+
+    UPLOAD_FOLDER.mkdir(parents=True, exist_ok=True)
+    pill_image.save(UPLOAD_FOLDER / stored_filename)
+
+    return render_template(
+        "index.html",
+        medicine_name="",
+        medicines=[],
+        upload_success="알약 사진이 정상적으로 업로드되었습니다."
     )
 
 

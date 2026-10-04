@@ -23,6 +23,35 @@
 
     </form>
 
+    <section aria-labelledby="image-search-title">
+        <h2 id="image-search-title">알약 사진으로 찾기</h2>
+
+        <form
+            action="{{ url_for('identify') }}"
+            method="POST"
+            enctype="multipart/form-data"
+        >
+            <label for="pill-image">알약 사진</label>
+
+            <input
+                id="pill-image"
+                type="file"
+                name="pill_image"
+                accept=".jpg,.jpeg,.png,image/jpeg,image/png"
+            >
+
+            <button type="submit">사진 업로드</button>
+        </form>
+
+        {% if upload_success %}
+            <p role="status">{{ upload_success }}</p>
+        {% endif %}
+
+        {% if upload_error %}
+            <p role="alert">{{ upload_error }}</p>
+        {% endif %}
+    </section>
+
 
     {% if medicine_name %}
 
