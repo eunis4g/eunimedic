@@ -54,6 +54,115 @@
 
         {% endif %}
 
+        <section class="detail-section" aria-labelledby="pill-identification-title">
+            <h2 id="pill-identification-title">낱알식별 정보</h2>
+
+            {% if pill_identifications %}
+
+                <div class="info-card-list pill-identification-list">
+                    {% for pill in pill_identifications %}
+
+                        <article class="info-card pill-identification-card">
+                            {% if pill.item_image %}
+                                <div class="pill-image-wrap">
+                                    <img
+                                        class="pill-image"
+                                        src="{{ pill.item_image }}"
+                                        alt="{{ pill.item_name }} 낱알 이미지"
+                                    >
+                                </div>
+                            {% endif %}
+
+                            <dl class="pill-info-list">
+                                {% if pill.form_code_name %}
+                                    <div>
+                                        <dt>제형</dt>
+                                        <dd>{{ pill.form_code_name }}</dd>
+                                    </div>
+                                {% endif %}
+
+                                {% if pill.drug_shape %}
+                                    <div>
+                                        <dt>모양</dt>
+                                        <dd>{{ pill.drug_shape }}</dd>
+                                    </div>
+                                {% endif %}
+
+                                {% if pill.color_class1 %}
+                                    <div>
+                                        <dt>색상 1</dt>
+                                        <dd>{{ pill.color_class1 }}</dd>
+                                    </div>
+                                {% endif %}
+
+                                {% if pill.color_class2 %}
+                                    <div>
+                                        <dt>색상 2</dt>
+                                        <dd>{{ pill.color_class2 }}</dd>
+                                    </div>
+                                {% endif %}
+
+                                {% if pill.print_front %}
+                                    <div>
+                                        <dt>앞면 표시</dt>
+                                        <dd>{{ pill.print_front }}</dd>
+                                    </div>
+                                {% endif %}
+
+                                {% if pill.print_back %}
+                                    <div>
+                                        <dt>뒷면 표시</dt>
+                                        <dd>{{ pill.print_back }}</dd>
+                                    </div>
+                                {% endif %}
+
+                                {% if pill.line_front %}
+                                    <div>
+                                        <dt>앞면 분할선</dt>
+                                        <dd>{{ pill.line_front }}</dd>
+                                    </div>
+                                {% endif %}
+
+                                {% if pill.line_back %}
+                                    <div>
+                                        <dt>뒷면 분할선</dt>
+                                        <dd>{{ pill.line_back }}</dd>
+                                    </div>
+                                {% endif %}
+
+                                {% if pill.leng_long %}
+                                    <div>
+                                        <dt>장축</dt>
+                                        <dd>{{ pill.leng_long }}</dd>
+                                    </div>
+                                {% endif %}
+
+                                {% if pill.leng_short %}
+                                    <div>
+                                        <dt>단축</dt>
+                                        <dd>{{ pill.leng_short }}</dd>
+                                    </div>
+                                {% endif %}
+
+                                {% if pill.thick %}
+                                    <div>
+                                        <dt>두께</dt>
+                                        <dd>{{ pill.thick }}</dd>
+                                    </div>
+                                {% endif %}
+                            </dl>
+                        </article>
+
+                    {% endfor %}
+                </div>
+
+            {% else %}
+
+                <p class="empty-message">낱알식별 정보가 없습니다.</p>
+
+            {% endif %}
+        </section>
+
         <section class="detail-section" aria-labelledby="ingredient-title">
             <h2 id="ingredient-title">주성분 정보</h2>
 

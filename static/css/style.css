@@ -120,6 +120,54 @@
     gap: 16px;
 }
 
+.medicine-detail-page .pill-identification-card {
+    display: grid;
+    grid-template-columns: minmax(180px, 280px) minmax(0, 1fr);
+    gap: 24px;
+    align-items: start;
+}
+
+.medicine-detail-page .pill-image-wrap {
+    text-align: center;
+}
+
+.medicine-detail-page .pill-image {
+    display: block;
+    width: 100%;
+    max-width: 280px;
+    height: auto;
+    margin: 0 auto;
+    object-fit: contain;
+}
+
+.medicine-detail-page .pill-info-list {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 18px 24px;
+    margin: 0;
+}
+
+.medicine-detail-page .pill-info-list:only-child {
+    grid-column: 1 / -1;
+}
+
+.medicine-detail-page .pill-info-list > div {
+    min-width: 0;
+}
+
+.medicine-detail-page .pill-info-list dt {
+    margin-bottom: 6px;
+    color: #475569;
+    font-weight: 700;
+}
+
+.medicine-detail-page .pill-info-list dd {
+    margin: 0;
+    color: #1e293b;
+    line-height: 1.6;
+    overflow-wrap: anywhere;
+}
+
 .medicine-detail-page .easy-drug-text,
 .medicine-detail-page .permit-content {
     color: #344744;
@@ -220,7 +268,9 @@
     }
 
     .medicine-detail-page .basic-info-list,
-    .medicine-detail-page .ingredient-list {
+    .medicine-detail-page .ingredient-list,
+    .medicine-detail-page .pill-identification-card,
+    .medicine-detail-page .pill-info-list {
         grid-template-columns: 1fr;
     }
 

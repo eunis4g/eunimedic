@@ -13,6 +13,7 @@ API_URL = "https://apis.data.go.kr/1471000/DrugPrdtPrmsnInfoService08/getDrugPrd
 DETAIL_API_URL = "https://apis.data.go.kr/1471000/DrugPrdtPrmsnInfoService08/getDrugPrdtPrmsnDtlInq08"
 INGREDIENT_API_URL = "https://apis.data.go.kr/1471000/DrugPrdtPrmsnInfoService08/getDrugPrdtMcpnDtlInq08"
 EASY_DRUG_API_URL = "https://apis.data.go.kr/1471000/DrbEasyDrugInfoService/getDrbEasyDrugList"
+PILL_IDENTIFICATION_API_URL = "https://apis.data.go.kr/1471000/MdcinGrnIdntfcInfoService03/getMdcinGrnIdntfcInfoList03"
 
 
 def search_medicine(medicine_name):
@@ -206,3 +207,56 @@ def parse_easy_drug_response(response):
     }
 
     return easy_drug_info
+
+
+def get_pill_identification(item_seq):
+
+    params = {
+        "serviceKey": API_KEY,
+        "pageNo": "1",
+        "numOfRows": "10",
+        "type": "xml",
+        "item_seq": item_seq
+    }
+
+    response = requests.get(PILL_IDENTIFICATION_API_URL, params=params)
+
+    return response
+
+
+def parse_pill_identification_response(response):
+
+    root = ET.fromstring(response.text)
+
+    total_count = root.findtext("./body/totalCount")
+
+    if total_count == "0":
+        return []
+
+    pill_identifications = []
+
+    items = root.findall("./body/items/item")
+
+    for item in items:
+
+        pill_identification = {
+            "item_seq": _extract_text(item.find("ITEM_SEQ")),
+            "item_name": _extract_text(item.find("ITEM_NAME")),
+            "entp_name": _extract_text(item.find("ENTP_NAME")),
+            "item_image": _extract_text(item.find("ITEM_IMAGE")),
+            "form_code_name": _extract_text(item.find("FORM_CODE_NAME")),
+            "drug_shape": _extract_text(item.find("DRUG_SHAPE")),
+            "color_class1": _extract_text(item.find("COLOR_CLASS1")),
+            "color_class2": _extract_text(item.find("COLOR_CLASS2")),
+            "print_front": _extract_text(item.find("PRINT_FRONT")),
+            "print_back": _extract_text(item.find("PRINT_BACK")),
+            "line_front": _extract_text(item.find("LINE_FRONT")),
+            "line_back": _extract_text(item.find("LINE_BACK")),
+            "leng_long": _extract_text(item.find("LENG_LONG")),
+            "leng_short": _extract_text(item.find("LENG_SHORT")),
+            "thick": _extract_text(item.find("THICK")),
+        }
+
+        pill_identifications.append(pill_identification)
+
+    return pill_identifications

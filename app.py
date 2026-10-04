@@ -12,6 +12,8 @@ from api.medicine_api import (
     parse_medicine_ingredient_response,
     get_easy_drug_info,
     parse_easy_drug_response,
+    get_pill_identification,
+    parse_pill_identification_response,
 )
 
 
@@ -114,12 +116,19 @@ def medicine_detail(item_seq):
 
     easy_drug_info = parse_easy_drug_response(easy_drug_response)
 
+    pill_response = get_pill_identification(item_seq)
+
+    print("낱알식별 상태 코드:", pill_response.status_code)
+
+    pill_identifications = parse_pill_identification_response(pill_response)
+
     return render_template(
         "medicine_detail.html",
         item_seq=item_seq,
         medicine=medicine,
         ingredients=ingredients,
-        easy_drug_info=easy_drug_info
+        easy_drug_info=easy_drug_info,
+        pill_identifications=pill_identifications
     )
 
 if __name__ == "__main__":
