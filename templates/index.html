@@ -25,6 +25,7 @@
     <nav aria-label="회원 메뉴">
         {% if current_user.is_authenticated %}
             <p>로그인: {{ current_user.username }}</p>
+            <a href="{{ url_for('my_medicines') }}">내 복용약</a>
 
             <form action="{{ url_for('logout') }}" method="POST">
                 <input

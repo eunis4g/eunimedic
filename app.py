@@ -8,6 +8,7 @@ import secrets
 from datetime import timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
+from xml.etree.ElementTree import ParseError
 
 import nh3
 
@@ -23,6 +24,7 @@ from flask_login import (
 from flask_migrate import Migrate
 from flask_wtf.csrf import CSRFProtect
 from markupsafe import Markup
+from requests import RequestException
 from sqlalchemy.exc import IntegrityError
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
@@ -39,7 +41,14 @@ from api.medicine_api import (
     get_pill_identification,
     parse_pill_identification_response,
 )
-from models import PendingRegistration, User, db, utc_now
+from models import (
+    Medicine,
+    PendingRegistration,
+    User,
+    UserMedicine,
+    db,
+    utc_now,
+)
 from services.email_service import EmailServiceError, send_verification_email
 
 
@@ -258,6 +267,18 @@ def mask_email(email):
     visible_part = local_part[:2] if len(local_part) > 2 else local_part[:1]
 
     return f"{visible_part}***@{domain}"
+
+
+def fetch_verified_medicine_detail(item_seq):
+
+    response = get_medicine_detail(item_seq)
+    response.raise_for_status()
+    medicine = parse_medicine_detail_response(response)
+
+    if medicine is None or medicine.get("item_seq") != item_seq:
+        return None
+
+    return medicine
 
 
 @app.route("/register", methods=["GET", "POST"])
@@ -725,6 +746,149 @@ def logout():
     flash("로그아웃되었습니다.", "success")
 
     return redirect(url_for("home"))
+
+
+@app.route("/my-medicines", methods=["GET"])
+@login_required
+def my_medicines():
+
+    user_medicines = db.session.scalars(
+        db.select(UserMedicine)
+        .where(
+            UserMedicine.user_id == current_user.user_id,
+            UserMedicine.is_active.is_(True),
+        )
+        .order_by(UserMedicine.registered_at.desc())
+    ).all()
+
+    return render_template(
+        "my_medicines.html",
+        user_medicines=user_medicines,
+    )
+
+
+@app.route("/my-medicines/add", methods=["GET"])
+@login_required
+def search_my_medicine():
+
+    medicine_name = request.args.get("medicine_name", "").strip()
+    medicines = []
+    search_performed = False
+    search_error = False
+
+    if medicine_name:
+        search_performed = True
+
+        try:
+            response = search_medicine(medicine_name)
+            response.raise_for_status()
+            medicines = parse_medicine_response(response)[:10]
+        except (RequestException, ParseError):
+            search_error = True
+
+    return render_template(
+        "add_my_medicine.html",
+        medicine_name=medicine_name,
+        medicines=medicines,
+        search_performed=search_performed,
+        search_error=search_error,
+    )
+
+
+@app.route("/my-medicines/add/<item_seq>", methods=["GET"])
+@login_required
+def add_my_medicine_detail(item_seq):
+
+    try:
+        medicine = fetch_verified_medicine_detail(item_seq)
+    except (RequestException, ParseError):
+        medicine = None
+
+    if medicine is None:
+        flash(
+            "의약품 정보를 불러오지 못했습니다. 잠시 후 다시 시도해주세요.",
+            "error",
+        )
+        return redirect(url_for("search_my_medicine"))
+
+    try:
+        pill_response = get_pill_identification(item_seq)
+        pill_response.raise_for_status()
+        pill_identifications = parse_pill_identification_response(
+            pill_response
+        )
+    except (RequestException, ParseError):
+        pill_identifications = []
+
+    return render_template(
+        "add_my_medicine_detail.html",
+        medicine=medicine,
+        pill_identifications=pill_identifications,
+    )
+
+
+@app.route("/my-medicines/add/<item_seq>", methods=["POST"])
+@login_required
+def register_my_medicine(item_seq):
+
+    user_medicine = db.session.scalar(
+        db.select(UserMedicine).where(
+            UserMedicine.user_id == current_user.user_id,
+            UserMedicine.medicine_item_seq == item_seq,
+        )
+    )
+
+    if user_medicine is not None and user_medicine.is_active:
+        flash("이미 내 복용약에 등록된 약입니다.", "error")
+        return redirect(url_for("my_medicines"))
+
+    medicine = db.session.get(Medicine, item_seq)
+
+    if medicine is None:
+        try:
+            medicine_data = fetch_verified_medicine_detail(item_seq)
+        except (RequestException, ParseError):
+            medicine_data = None
+
+        if medicine_data is None or not medicine_data.get("item_name"):
+            db.session.rollback()
+            flash(
+                "의약품 정보를 확인할 수 없어 등록하지 못했습니다.",
+                "error",
+            )
+            return redirect(url_for("search_my_medicine"))
+
+        medicine = Medicine(
+            item_seq=medicine_data["item_seq"],
+            item_name=medicine_data["item_name"],
+            entp_name=medicine_data.get("entp_name"),
+        )
+        db.session.add(medicine)
+
+    if user_medicine is None:
+        user_medicine = UserMedicine(
+            user_id=current_user.user_id,
+            medicine_item_seq=item_seq,
+            registration_source="search",
+            is_active=True,
+        )
+        db.session.add(user_medicine)
+    else:
+        user_medicine.is_active = True
+        user_medicine.registration_source = "search"
+
+    try:
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        flash(
+            "내 복용약 등록을 처리하지 못했습니다. 다시 시도해주세요.",
+            "error",
+        )
+        return redirect(url_for("my_medicines"))
+
+    flash("내 복용약에 등록했습니다.", "success")
+    return redirect(url_for("my_medicines"))
 
 
 @app.route("/", methods=["GET", "POST"])

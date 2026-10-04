@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+    <meta charset="UTF-8">
+    <title>내 복용약 등록</title>
+</head>
+
+<body>
+
+    <h1>내 복용약 등록</h1>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            <section aria-label="알림 메시지">
+                {% for category, message in messages %}
+                    <p role="{{ 'alert' if category == 'error' else 'status' }}">
+                        {{ message }}
+                    </p>
+                {% endfor %}
+            </section>
+        {% endif %}
+    {% endwith %}
+
+    <form action="{{ url_for('search_my_medicine') }}" method="GET">
+        <label for="medicine-name">약 이름</label>
+        <input
+            id="medicine-name"
+            type="search"
+            name="medicine_name"
+            value="{{ medicine_name }}"
+            required
+        >
+        <button type="submit">검색</button>
+    </form>
+
+    {% if search_error %}
+        <p role="alert">
+            의약품 정보를 불러오지 못했습니다. 잠시 후 다시 시도해주세요.
+        </p>
+    {% elif search_performed %}
+        {% if medicines %}
+            <section aria-labelledby="search-results-title">
+                <h2 id="search-results-title">검색 결과</h2>
+
+                {% for medicine in medicines %}
+                    <article>
+                        <h3>
+                            <a href="{{ url_for(
+                                'add_my_medicine_detail',
+                                item_seq=medicine.item_seq
+                            ) }}">
+                                {{ medicine.item_name }}
+                            </a>
+                        </h3>
+                        <p>
+                            제조사:
+                            {{ medicine.entp_name or '제조사 정보 없음' }}
+                        </p>
+                    </article>
+                {% endfor %}
+            </section>
+        {% else %}
+            <p>검색 결과가 없습니다.</p>
+        {% endif %}
+    {% endif %}
+
+    <p><a href="{{ url_for('my_medicines') }}">내 복용약으로 돌아가기</a></p>
+
+</body>
+
+</html>

@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+    <meta charset="UTF-8">
+    <title>복용약 등록 전 확인</title>
+</head>
+
+<body>
+
+    <h1>복용약 등록 전 확인</h1>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            <section aria-label="알림 메시지">
+                {% for category, message in messages %}
+                    <p role="{{ 'alert' if category == 'error' else 'status' }}">
+                        {{ message }}
+                    </p>
+                {% endfor %}
+            </section>
+        {% endif %}
+    {% endwith %}
+
+    <section aria-labelledby="medicine-basic-info-title">
+        <h2 id="medicine-basic-info-title">{{ medicine.item_name }}</h2>
+        <p>제조사: {{ medicine.entp_name or '제조사 정보 없음' }}</p>
+        <p>주성분: {{ medicine.material_name or '주성분 정보 없음' }}</p>
+    </section>
+
+    <section aria-labelledby="pill-identification-title">
+        <h2 id="pill-identification-title">낱알식별 정보</h2>
+
+        {% if pill_identifications %}
+            {% for pill in pill_identifications %}
+                <article>
+                    {% if pill.item_image %}
+                        <img
+                            src="{{ pill.item_image }}"
+                            alt="{{ medicine.item_name }} 알약 이미지"
+                        >
+                    {% else %}
+                        <p>등록된 이미지 없음</p>
+                    {% endif %}
+
+                    <dl>
+                        <div>
+                            <dt>제형</dt>
+                            <dd>{{ pill.form_code_name or '정보 없음' }}</dd>
+                        </div>
+                        <div>
+                            <dt>모양</dt>
+                            <dd>{{ pill.drug_shape or '정보 없음' }}</dd>
+                        </div>
+                        <div>
+                            <dt>색상</dt>
+                            <dd>
+                                {{ pill.color_class1 or '정보 없음' }}
+                                {% if pill.color_class2 %}
+                                    / {{ pill.color_class2 }}
+                                {% endif %}
+                            </dd>
+                        </div>
+                        <div>
+                            <dt>앞면 표시</dt>
+                            <dd>{{ pill.print_front or '정보 없음' }}</dd>
+                        </div>
+                        <div>
+                            <dt>뒷면 표시</dt>
+                            <dd>{{ pill.print_back or '정보 없음' }}</dd>
+                        </div>
+                        {% if pill.line_front %}
+                            <div>
+                                <dt>앞면 분할선</dt>
+                                <dd>{{ pill.line_front }}</dd>
+                            </div>
+                        {% endif %}
+                        {% if pill.line_back %}
+                            <div>
+                                <dt>뒷면 분할선</dt>
+                                <dd>{{ pill.line_back }}</dd>
+                            </div>
+                        {% endif %}
+                    </dl>
+                </article>
+            {% endfor %}
+        {% else %}
+            <p>등록된 이미지 없음</p>
+            <p>등록된 낱알식별 정보 없음</p>
+        {% endif %}
+    </section>
+
+    <form
+        action="{{ url_for(
+            'register_my_medicine',
+            item_seq=medicine.item_seq
+        ) }}"
+        method="POST"
+    >
+        <input
+            type="hidden"
+            name="csrf_token"
+            value="{{ csrf_token() }}"
+        >
+        <button type="submit">내 복용약에 등록</button>
+    </form>
+
+    <p><a href="{{ url_for('search_my_medicine') }}">검색으로 돌아가기</a></p>
+
+</body>
+
+</html>

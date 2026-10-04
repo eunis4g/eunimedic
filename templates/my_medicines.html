@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+    <meta charset="UTF-8">
+    <title>내 복용약</title>
+</head>
+
+<body>
+
+    <h1>내 복용약</h1>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            <section aria-label="알림 메시지">
+                {% for category, message in messages %}
+                    <p role="{{ 'alert' if category == 'error' else 'status' }}">
+                        {{ message }}
+                    </p>
+                {% endfor %}
+            </section>
+        {% endif %}
+    {% endwith %}
+
+    <p>
+        <a href="{{ url_for('search_my_medicine') }}">복용약 등록</a>
+    </p>
+
+    {% if user_medicines %}
+        {% for user_medicine in user_medicines %}
+            <article>
+                <h2>
+                    <a href="{{ url_for(
+                        'medicine_detail',
+                        item_seq=user_medicine.medicine.item_seq
+                    ) }}">
+                        {{ user_medicine.medicine.item_name }}
+                    </a>
+                </h2>
+                <p>
+                    제조사:
+                    {{ user_medicine.medicine.entp_name or '제조사 정보 없음' }}
+                </p>
+            </article>
+        {% endfor %}
+    {% else %}
+        <p>등록된 복용약이 없습니다.</p>
+    {% endif %}
+
+    <p><a href="{{ url_for('home') }}">홈으로 이동</a></p>
+
+</body>
+
+</html>
