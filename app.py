@@ -596,10 +596,21 @@ def verify_email(token):
                 flash("이메일 인증과 회원가입이 완료되었습니다.", "success")
                 return redirect(url_for("login"))
 
+    resend_available_at = (
+        as_utc(pending_registration.last_sent_at) + RESEND_COOLDOWN
+    )
+    resend_remaining_seconds = max(
+        0,
+        math.ceil(
+            (resend_available_at - current_time).total_seconds()
+        ),
+    )
+
     return render_template(
         "verify_email.html",
         token=token,
         masked_email=mask_email(pending_registration.email),
+        resend_remaining_seconds=resend_remaining_seconds,
     )
 
 

@@ -5,6 +5,7 @@
     <meta charset="UTF-8">
     <meta name="referrer" content="no-referrer">
     <title>이메일 인증</title>
+    <script src="{{ url_for('static', filename='js/script.js') }}" defer></script>
 </head>
 
 <body>
@@ -62,7 +63,18 @@
             value="{{ csrf_token() }}"
         >
 
-        <button type="submit">인증번호 재전송</button>
+        <button
+            id="resend-verification-button"
+            type="submit"
+            data-remaining-seconds="{{ resend_remaining_seconds }}"
+            {% if resend_remaining_seconds > 0 %}disabled{% endif %}
+        >
+            {% if resend_remaining_seconds > 0 %}
+                인증메일 재전송 ({{ resend_remaining_seconds }}초)
+            {% else %}
+                인증메일 재전송
+            {% endif %}
+        </button>
     </form>
 
 </body>

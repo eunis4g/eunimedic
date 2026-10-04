@@ -45,3 +45,53 @@ passwordRevealButtons.forEach((button) => {
         }
     });
 });
+
+const resendVerificationButton = document.getElementById(
+    "resend-verification-button"
+);
+
+if (resendVerificationButton) {
+    const initialRemainingSeconds = Number.parseInt(
+        resendVerificationButton.dataset.remainingSeconds,
+        10
+    );
+
+    if (
+        Number.isFinite(initialRemainingSeconds)
+        && initialRemainingSeconds > 0
+    ) {
+        const resendAvailableAt = (
+            Date.now() + initialRemainingSeconds * 1000
+        );
+
+        const updateResendCountdown = () => {
+            const remainingSeconds = Math.max(
+                0,
+                Math.ceil((resendAvailableAt - Date.now()) / 1000)
+            );
+
+            if (remainingSeconds === 0) {
+                resendVerificationButton.disabled = false;
+                resendVerificationButton.textContent = "인증메일 재전송";
+                return true;
+            }
+
+            resendVerificationButton.disabled = true;
+            resendVerificationButton.textContent = (
+                `인증메일 재전송 (${remainingSeconds}초)`
+            );
+            return false;
+        };
+
+        updateResendCountdown();
+
+        const countdownInterval = window.setInterval(() => {
+            if (updateResendCountdown()) {
+                window.clearInterval(countdownInterval);
+            }
+        }, 1000);
+    } else {
+        resendVerificationButton.disabled = false;
+        resendVerificationButton.textContent = "인증메일 재전송";
+    }
+}
