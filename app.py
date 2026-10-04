@@ -13,7 +13,7 @@ from xml.etree.ElementTree import ParseError
 import nh3
 
 from dotenv import load_dotenv
-from flask import Flask, flash, redirect, render_template, request, url_for
+from flask import abort, Flask, flash, redirect, render_template, request, url_for
 from flask_login import (
     LoginManager,
     current_user,
@@ -25,7 +25,7 @@ from flask_migrate import Migrate
 from flask_wtf.csrf import CSRFProtect
 from markupsafe import Markup
 from requests import RequestException
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
 
@@ -888,6 +888,43 @@ def register_my_medicine(item_seq):
         return redirect(url_for("my_medicines"))
 
     flash("내 복용약에 등록했습니다.", "success")
+    return redirect(url_for("my_medicines"))
+
+
+@app.route(
+    "/my-medicines/<int:user_medicine_id>/deactivate",
+    methods=["POST"],
+)
+@login_required
+def deactivate_my_medicine(user_medicine_id):
+
+    user_medicine = db.session.scalar(
+        db.select(UserMedicine).where(
+            UserMedicine.user_medicine_id == user_medicine_id,
+            UserMedicine.user_id == current_user.user_id,
+        )
+    )
+
+    if user_medicine is None:
+        abort(404)
+
+    if not user_medicine.is_active:
+        flash("이미 내 복용약에서 제거된 약입니다.", "info")
+        return redirect(url_for("my_medicines"))
+
+    user_medicine.is_active = False
+
+    try:
+        db.session.commit()
+    except SQLAlchemyError:
+        db.session.rollback()
+        flash(
+            "내 복용약 제거를 처리하지 못했습니다. 다시 시도해주세요.",
+            "error",
+        )
+        return redirect(url_for("my_medicines"))
+
+    flash("내 복용약에서 제거했습니다.", "success")
     return redirect(url_for("my_medicines"))
 
 

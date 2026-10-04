@@ -41,6 +41,29 @@
                     제조사:
                     {{ user_medicine.medicine.entp_name or '제조사 정보 없음' }}
                 </p>
+                <p>
+                    <a href="{{ url_for(
+                        'medicine_detail',
+                        item_seq=user_medicine.medicine.item_seq
+                    ) }}">
+                        상세보기
+                    </a>
+                </p>
+                <form
+                    action="{{ url_for(
+                        'deactivate_my_medicine',
+                        user_medicine_id=user_medicine.user_medicine_id
+                    ) }}"
+                    method="POST"
+                    onsubmit="return confirm('정말 내 복용약에서 제거하시겠습니까?');"
+                >
+                    <input
+                        type="hidden"
+                        name="csrf_token"
+                        value="{{ csrf_token() }}"
+                    >
+                    <button type="submit">내 복용약에서 제거</button>
+                </form>
             </article>
         {% endfor %}
     {% else %}
