@@ -10,7 +10,43 @@
 
     <h1>💊 약 정보 검색</h1>
 
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            <section aria-label="알림 메시지">
+                {% for category, message in messages %}
+                    <p role="{{ 'alert' if category == 'error' else 'status' }}">
+                        {{ message }}
+                    </p>
+                {% endfor %}
+            </section>
+        {% endif %}
+    {% endwith %}
+
+    <nav aria-label="회원 메뉴">
+        {% if current_user.is_authenticated %}
+            <p>로그인: {{ current_user.username }}</p>
+
+            <form action="{{ url_for('logout') }}" method="POST">
+                <input
+                    type="hidden"
+                    name="csrf_token"
+                    value="{{ csrf_token() }}"
+                >
+                <button type="submit">로그아웃</button>
+            </form>
+        {% else %}
+            <a href="{{ url_for('register') }}">회원가입</a>
+            <a href="{{ url_for('login') }}">로그인</a>
+        {% endif %}
+    </nav>
+
     <form action="/" method="POST">
+
+        <input
+            type="hidden"
+            name="csrf_token"
+            value="{{ csrf_token() }}"
+        >
 
         <input
             type="text"
@@ -31,6 +67,12 @@
             method="POST"
             enctype="multipart/form-data"
         >
+            <input
+                type="hidden"
+                name="csrf_token"
+                value="{{ csrf_token() }}"
+            >
+
             <label for="pill-image">알약 사진</label>
 
             <input

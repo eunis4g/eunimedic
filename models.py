@@ -1,6 +1,7 @@
 import sqlite3
 from datetime import datetime, timezone
 
+from flask_login import UserMixin
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
@@ -23,10 +24,15 @@ def enable_sqlite_foreign_keys(dbapi_connection, connection_record):
         cursor.close()
 
 
-class User(db.Model):
+class User(UserMixin, db.Model):
     __tablename__ = "users"
 
     user_id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(
+        db.String(20),
+        nullable=False,
+        unique=True,
+    )
     email = db.Column(
         db.String(320),
         nullable=False,
@@ -65,6 +71,84 @@ class User(db.Model):
         back_populates="user",
         cascade="all, delete-orphan",
         passive_deletes=True,
+    )
+
+    def get_id(self):
+
+        return str(self.user_id)
+
+
+class PendingRegistration(db.Model):
+    __tablename__ = "pending_registrations"
+
+    pending_registration_id = db.Column(
+        db.Integer,
+        primary_key=True,
+    )
+    username = db.Column(
+        db.String(20),
+        nullable=False,
+        unique=True,
+    )
+    email = db.Column(
+        db.String(320),
+        nullable=False,
+        unique=True,
+    )
+    password_hash = db.Column(
+        db.String(255),
+        nullable=False,
+    )
+    verification_code_hash = db.Column(
+        db.String(64),
+        nullable=False,
+    )
+    verification_token_hash = db.Column(
+        db.String(64),
+        nullable=False,
+        unique=True,
+    )
+    expires_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+    )
+    attempt_count = db.Column(
+        db.Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    resend_count = db.Column(
+        db.Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    last_sent_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+    )
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=utc_now,
+    )
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=utc_now,
+        onupdate=utc_now,
+    )
+
+    __table_args__ = (
+        db.CheckConstraint(
+            "attempt_count BETWEEN 0 AND 5",
+            name="ck_pending_registration_attempt_count",
+        ),
+        db.CheckConstraint(
+            "resend_count BETWEEN 0 AND 4",
+            name="ck_pending_registration_resend_count",
+        ),
     )
 
 

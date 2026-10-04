@@ -1,6 +1,7 @@
 secret.py
 .env
 medicine.db
+medicine.db.*.bak
 __pycache__/
 *.pyc
 .venv/
