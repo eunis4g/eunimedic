@@ -3,136 +3,225 @@
 
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>의약품 상세정보</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
 
-<body>
+<body class="medicine-detail-page">
 
-    <h1>💊 의약품 상세정보</h1>
+    <main class="detail-container">
+        <header class="detail-header">
+            <h1>💊 의약품 상세정보</h1>
 
-    {% if medicine %}
+            {% if medicine %}
+                <p class="product-name">{{ medicine.item_name }}</p>
+            {% endif %}
+        </header>
 
-        <h2>{{ medicine.item_name }}</h2>
+        {% if medicine %}
 
-        <p>품목기준코드: {{ medicine.item_seq }}</p>
-        <p>업체명: {{ medicine.entp_name }}</p>
-        <p>허가일자: {{ medicine.item_permit_date }}</p>
-        <p>전문·일반의약품 구분: {{ medicine.etc_otc_code }}</p>
+            <section class="detail-section" aria-labelledby="basic-info-title">
+                <h2 id="basic-info-title">기본 의약품 정보</h2>
 
-        {% if medicine.chart %}
-            <h3>성상</h3>
-            <p>{{ medicine.chart }}</p>
+                <article class="info-card">
+                    <dl class="basic-info-list">
+                        <div class="basic-info-item">
+                            <dt>품목기준코드</dt>
+                            <dd>{{ medicine.item_seq }}</dd>
+                        </div>
+                        <div class="basic-info-item">
+                            <dt>업체명</dt>
+                            <dd>{{ medicine.entp_name }}</dd>
+                        </div>
+                        <div class="basic-info-item">
+                            <dt>허가일자</dt>
+                            <dd>{{ medicine.item_permit_date }}</dd>
+                        </div>
+                        <div class="basic-info-item">
+                            <dt>전문·일반의약품 구분</dt>
+                            <dd>{{ medicine.etc_otc_code }}</dd>
+                        </div>
+                    </dl>
+                </article>
+            </section>
+
+        {% else %}
+
+            <section class="detail-section">
+                <p class="empty-message">품목기준코드 {{ item_seq }}에 해당하는 상세정보를 찾을 수 없습니다.</p>
+            </section>
+
         {% endif %}
 
-        {% if medicine.material_name %}
-            <h3>원료약품 및 분량</h3>
-            <p>{{ medicine.material_name }}</p>
+        <section class="detail-section" aria-labelledby="ingredient-title">
+            <h2 id="ingredient-title">주성분 정보</h2>
+
+            {% if ingredients %}
+
+                <div class="ingredient-list">
+                    {% for ingredient in ingredients %}
+
+                        <article class="info-card ingredient-card">
+                            <dl class="ingredient-info">
+                                <div>
+                                    <dt>성분명</dt>
+                                    <dd>{{ ingredient.mtral_nm }}</dd>
+                                </div>
+                                <div>
+                                    <dt>함량</dt>
+                                    <dd>{{ ingredient.qnt }}</dd>
+                                </div>
+                                <div>
+                                    <dt>단위</dt>
+                                    <dd>{{ ingredient.ingd_unit_cd }}</dd>
+                                </div>
+                            </dl>
+                        </article>
+
+                    {% endfor %}
+                </div>
+
+            {% else %}
+
+                <p class="empty-message">주성분 정보가 없습니다.</p>
+
+            {% endif %}
+        </section>
+
+        <section class="detail-section" aria-labelledby="easy-drug-title">
+            <h2 id="easy-drug-title">e약은요 복약안내</h2>
+
+            {% if easy_drug_info %}
+
+                <div class="info-card-list">
+                    {% if easy_drug_info.efficacy %}
+                        <article class="info-card">
+                            <h3>효능·효과</h3>
+                            <p class="easy-drug-text">{{ easy_drug_info.efficacy }}</p>
+                        </article>
+                    {% endif %}
+
+                    {% if easy_drug_info.use_method %}
+                        <article class="info-card">
+                            <h3>복용 방법</h3>
+                            <p class="easy-drug-text">{{ easy_drug_info.use_method }}</p>
+                        </article>
+                    {% endif %}
+
+                    {% if easy_drug_info.warning %}
+                        <article class="info-card">
+                            <h3>복용 전 경고</h3>
+                            <p class="easy-drug-text">{{ easy_drug_info.warning }}</p>
+                        </article>
+                    {% endif %}
+
+                    {% if easy_drug_info.precautions %}
+                        <article class="info-card">
+                            <h3>주의사항</h3>
+                            <p class="easy-drug-text">{{ easy_drug_info.precautions }}</p>
+                        </article>
+                    {% endif %}
+
+                    {% if easy_drug_info.interactions %}
+                        <article class="info-card">
+                            <h3>약·음식 상호작용</h3>
+                            <p class="easy-drug-text">{{ easy_drug_info.interactions }}</p>
+                        </article>
+                    {% endif %}
+
+                    {% if easy_drug_info.side_effects %}
+                        <article class="info-card">
+                            <h3>부작용·이상반응</h3>
+                            <p class="easy-drug-text">{{ easy_drug_info.side_effects }}</p>
+                        </article>
+                    {% endif %}
+
+                    {% if easy_drug_info.storage_method %}
+                        <article class="info-card">
+                            <h3>보관 방법</h3>
+                            <p class="easy-drug-text">{{ easy_drug_info.storage_method }}</p>
+                        </article>
+                    {% endif %}
+                </div>
+
+            {% else %}
+
+                <p class="empty-message">e약은요 정보가 없습니다.</p>
+
+            {% endif %}
+        </section>
+
+        {% if medicine %}
+
+            <section class="detail-section permit-section" aria-labelledby="permit-info-title">
+                <h2 id="permit-info-title">기존 허가 상세정보</h2>
+
+                <div class="info-card-list">
+                    {% if medicine.chart %}
+                        <article class="info-card">
+                            <h3>성상</h3>
+                            <p>{{ medicine.chart }}</p>
+                        </article>
+                    {% endif %}
+
+                    {% if medicine.material_name %}
+                        <article class="info-card">
+                            <h3>원료약품 및 분량</h3>
+                            <p>{{ medicine.material_name }}</p>
+                        </article>
+                    {% endif %}
+
+                    {% if medicine.ee_doc_data %}
+                        <article class="info-card">
+                            <h3>효능·효과</h3>
+                            <div class="permit-content">{{ medicine.ee_doc_data | sanitize_html }}</div>
+                        </article>
+                    {% endif %}
+
+                    {% if medicine.ud_doc_data %}
+                        <article class="info-card">
+                            <h3>용법·용량</h3>
+                            <div class="permit-content">{{ medicine.ud_doc_data | sanitize_html }}</div>
+                        </article>
+                    {% endif %}
+
+                    {% if medicine.nb_doc_data %}
+                        <article class="info-card">
+                            <h3>사용상의 주의사항</h3>
+                            <div class="permit-content">{{ medicine.nb_doc_data | sanitize_html }}</div>
+                        </article>
+                    {% endif %}
+
+                    {% if medicine.storage_method %}
+                        <article class="info-card">
+                            <h3>저장방법</h3>
+                            <p>{{ medicine.storage_method }}</p>
+                        </article>
+                    {% endif %}
+
+                    {% if medicine.valid_term %}
+                        <article class="info-card">
+                            <h3>유효기간</h3>
+                            <p>{{ medicine.valid_term }}</p>
+                        </article>
+                    {% endif %}
+
+                    {% if medicine.pack_unit %}
+                        <article class="info-card">
+                            <h3>포장단위</h3>
+                            <p>{{ medicine.pack_unit }}</p>
+                        </article>
+                    {% endif %}
+                </div>
+            </section>
+
         {% endif %}
 
-        {% if medicine.ee_doc_data %}
-            <h3>효능·효과</h3>
-            <div>{{ medicine.ee_doc_data | sanitize_html }}</div>
-        {% endif %}
-
-        {% if medicine.ud_doc_data %}
-            <h3>용법·용량</h3>
-            <div>{{ medicine.ud_doc_data | sanitize_html }}</div>
-        {% endif %}
-
-        {% if medicine.nb_doc_data %}
-            <h3>사용상의 주의사항</h3>
-            <div>{{ medicine.nb_doc_data | sanitize_html }}</div>
-        {% endif %}
-
-        {% if medicine.storage_method %}
-            <h3>저장방법</h3>
-            <p>{{ medicine.storage_method }}</p>
-        {% endif %}
-
-        {% if medicine.valid_term %}
-            <h3>유효기간</h3>
-            <p>{{ medicine.valid_term }}</p>
-        {% endif %}
-
-        {% if medicine.pack_unit %}
-            <h3>포장단위</h3>
-            <p>{{ medicine.pack_unit }}</p>
-        {% endif %}
-
-    {% else %}
-
-        <p>품목기준코드 {{ item_seq }}에 해당하는 상세정보를 찾을 수 없습니다.</p>
-
-    {% endif %}
-
-    <h2>e약은요 복약안내</h2>
-
-    {% if easy_drug_info %}
-
-        {% if easy_drug_info.efficacy %}
-            <h3>효능·효과</h3>
-            <p class="easy-drug-text">{{ easy_drug_info.efficacy }}</p>
-        {% endif %}
-
-        {% if easy_drug_info.use_method %}
-            <h3>복용 방법</h3>
-            <p class="easy-drug-text">{{ easy_drug_info.use_method }}</p>
-        {% endif %}
-
-        {% if easy_drug_info.warning %}
-            <h3>복용 전 경고</h3>
-            <p class="easy-drug-text">{{ easy_drug_info.warning }}</p>
-        {% endif %}
-
-        {% if easy_drug_info.precautions %}
-            <h3>주의사항</h3>
-            <p class="easy-drug-text">{{ easy_drug_info.precautions }}</p>
-        {% endif %}
-
-        {% if easy_drug_info.interactions %}
-            <h3>약·음식 상호작용</h3>
-            <p class="easy-drug-text">{{ easy_drug_info.interactions }}</p>
-        {% endif %}
-
-        {% if easy_drug_info.side_effects %}
-            <h3>부작용·이상반응</h3>
-            <p class="easy-drug-text">{{ easy_drug_info.side_effects }}</p>
-        {% endif %}
-
-        {% if easy_drug_info.storage_method %}
-            <h3>보관 방법</h3>
-            <p class="easy-drug-text">{{ easy_drug_info.storage_method }}</p>
-        {% endif %}
-
-    {% else %}
-
-        <p>e약은요 정보가 없습니다.</p>
-
-    {% endif %}
-
-    <h2>주성분 정보</h2>
-
-    {% if ingredients %}
-
-        {% for ingredient in ingredients %}
-
-            <div>
-                <p>성분명: {{ ingredient.mtral_nm }}</p>
-                <p>함량: {{ ingredient.qnt }}</p>
-                <p>단위: {{ ingredient.ingd_unit_cd }}</p>
-                <hr>
-            </div>
-
-        {% endfor %}
-
-    {% else %}
-
-        <p>주성분 정보가 없습니다.</p>
-
-    {% endif %}
-
-    <a href="/">← 검색으로 돌아가기</a>
+        <div class="detail-actions">
+            <a class="back-link" href="/">← 검색으로 돌아가기</a>
+        </div>
+    </main>
 
 </body>
 
