@@ -4,6 +4,7 @@ from uuid import uuid4
 import nh3
 
 from flask import Flask, render_template, request
+from flask_migrate import Migrate
 from markupsafe import Markup
 from werkzeug.utils import secure_filename
 
@@ -19,10 +20,23 @@ from api.medicine_api import (
     get_pill_identification,
     parse_pill_identification_response,
 )
+from models import db
 
 
 
 app = Flask(__name__)
+
+
+BASE_DIR = Path(__file__).resolve().parent
+DATABASE_PATH = BASE_DIR / "medicine.db"
+
+app.config["SQLALCHEMY_DATABASE_URI"] = (
+    "sqlite:///" + DATABASE_PATH.as_posix()
+)
+app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+
+db.init_app(app)
+migrate = Migrate(app, db)
 
 
 UPLOAD_FOLDER = Path(app.static_folder) / "uploads"
