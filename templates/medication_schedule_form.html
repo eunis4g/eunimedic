@@ -41,28 +41,43 @@
             value="{{ csrf_token() }}"
         >
 
-        <p>
-            <label for="dose_amount_text">복용량</label>
+        <fieldset>
+            <legend>복용량</legend>
+            <button
+                id="decrease-dose-amount"
+                type="button"
+                aria-label="복용량 줄이기"
+            >-</button>
             <input
                 id="dose_amount_text"
                 name="dose_amount_text"
-                type="text"
+                type="number"
+                step="any"
                 maxlength="100"
                 value="{{ form_data.dose_amount_text }}"
                 required
             >
-        </p>
+            <button
+                id="increase-dose-amount"
+                type="button"
+                aria-label="복용량 늘리기"
+            >+</button>
+            <p>
+                소수점 단위로 복용하는 경우 직접 입력해주세요. (예: 0.5)
+            </p>
+        </fieldset>
 
         <p>
             <label for="dose_unit_text">복용 단위</label>
-            <input
-                id="dose_unit_text"
-                name="dose_unit_text"
-                type="text"
-                maxlength="100"
-                value="{{ form_data.dose_unit_text }}"
-                required
-            >
+            <select id="dose_unit_text" name="dose_unit_text" required>
+                <option value="">선택</option>
+                {% for dose_unit in ['정', '캡슐', '포'] %}
+                    <option
+                        value="{{ dose_unit }}"
+                        {% if form_data.dose_unit_text == dose_unit %}selected{% endif %}
+                    >{{ dose_unit }}</option>
+                {% endfor %}
+            </select>
         </p>
 
         <p>
@@ -178,10 +193,45 @@
 
     <script>
         (() => {
+            const doseAmountInput = document.getElementById("dose_amount_text");
             const frequencyInput = document.getElementById("daily_frequency");
             const courseDaysInput = document.getElementById("course_days");
             const timesContainer = document.getElementById("medication-times");
             const plannedTotal = document.getElementById("planned-total");
+
+            function adjustDoseAmount(change) {
+                const match = /^([0-9]+)(?:\.([0-9]+))?$/.exec(
+                    doseAmountInput.value.trim()
+                );
+
+                if (!match) {
+                    return;
+                }
+
+                const fraction = match[2] || "";
+                const scale = 10n ** BigInt(fraction.length);
+                const currentValue = (
+                    BigInt(match[1]) * scale
+                    + BigInt(fraction || "0")
+                );
+                const nextValue = currentValue + BigInt(change) * scale;
+
+                if (nextValue <= 0n) {
+                    return;
+                }
+
+                const whole = nextValue / scale;
+
+                if (!fraction) {
+                    doseAmountInput.value = whole.toString();
+                    return;
+                }
+
+                const remainder = (nextValue % scale)
+                    .toString()
+                    .padStart(fraction.length, "0");
+                doseAmountInput.value = `${whole}.${remainder}`;
+            }
 
             function readPositiveInteger(input) {
                 const value = Number(input.value);
@@ -246,6 +296,14 @@
                     frequencyInput.value = frequency + 1;
                     rebuildTimeInputs();
                 }
+            );
+            document.getElementById("decrease-dose-amount").addEventListener(
+                "click",
+                () => adjustDoseAmount(-1)
+            );
+            document.getElementById("increase-dose-amount").addEventListener(
+                "click",
+                () => adjustDoseAmount(1)
             );
             frequencyInput.addEventListener("change", rebuildTimeInputs);
             courseDaysInput.addEventListener("input", updatePlannedTotal);

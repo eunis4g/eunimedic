@@ -342,6 +342,7 @@ class MedicationScheduleRouteTest(unittest.TestCase):
         cases = (
             self.valid_form_data(dose_amount_text="   "),
             self.valid_form_data(dose_unit_text="   "),
+            self.valid_form_data(dose_unit_text="mL"),
             self.valid_form_data(intake_timing="not-allowed"),
         )
 
@@ -382,14 +383,93 @@ class MedicationScheduleRouteTest(unittest.TestCase):
         self.log_in()
         response = self.post_schedule(
             self.valid_form_data(
-                dose_amount_text="",
-                dose_unit_text="custom-unit",
+                dose_amount_text="2.25",
+                course_days="0",
                 start_date="2026-10-05",
             )
         )
         self.assertEqual(response.status_code, 400)
-        self.assertIn(b'value="custom-unit"', response.data)
+        self.assertIn(b'value="2.25"', response.data)
         self.assertIn(b'value="2026-10-05"', response.data)
+
+    def test_positive_decimal_dose_amounts_are_stored_as_entered(self):
+        self.log_in()
+        token = self.get_csrf_token()
+
+        for dose_amount in ("0.5", "1.5", "2.25"):
+            with self.subTest(dose_amount=dose_amount):
+                response = self.post_schedule(
+                    self.valid_form_data(
+                        dose_amount_text=dose_amount,
+                        course_days="1",
+                        reported_doses_taken_before_tracking="1",
+                    ),
+                    token=token,
+                )
+                self.assertEqual(response.status_code, 302)
+                schedule = db.session.scalar(
+                    db.select(MedicationSchedule)
+                    .order_by(MedicationSchedule.schedule_id.desc())
+                )
+                self.assertEqual(
+                    schedule.dose_amount_text,
+                    dose_amount,
+                )
+                self.assertFalse(schedule.is_active)
+
+    def test_non_positive_and_invalid_decimal_doses_are_rejected(self):
+        self.log_in()
+        token = self.get_csrf_token()
+        invalid_values = (
+            "0",
+            "-1",
+            "-0.5",
+            "abc",
+            "1..5",
+            "NaN",
+            "Infinity",
+        )
+
+        for dose_amount in invalid_values:
+            with self.subTest(dose_amount=dose_amount):
+                response = self.post_schedule(
+                    self.valid_form_data(
+                        dose_amount_text=dose_amount
+                    ),
+                    token=token,
+                )
+                self.assertEqual(response.status_code, 400)
+
+        self.assertEqual(
+            db.session.query(MedicationSchedule).count(),
+            0,
+        )
+
+    def test_decimal_dose_does_not_change_occurrence_count(self):
+        self.log_in()
+        response = self.post_schedule(
+            self.valid_form_data(
+                dose_amount_text="0.5",
+                dose_unit_text="정",
+                daily_frequency="3",
+                medication_times=["08:00", "14:00", "20:00"],
+                course_days="3",
+            )
+        )
+        self.assertEqual(response.status_code, 302)
+        schedule = db.session.scalar(db.select(MedicationSchedule))
+        tracking_started_at = app_module.as_utc(
+            schedule.reminder_tracking_started_at
+        )
+        summary = app_module.calculate_stored_schedule_summary(
+            schedule,
+            reference_at=tracking_started_at,
+            timezone_name="Asia/Seoul",
+        )
+        self.assertEqual(schedule.dose_amount_text, "0.5")
+        self.assertEqual(summary.daily_frequency, 3)
+        self.assertEqual(summary.planned_total, 9)
+        self.assertEqual(summary.remaining, 9)
 
     def test_past_today_and_future_start_dates_are_accepted(self):
         self.log_in()

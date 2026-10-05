@@ -6,6 +6,7 @@ import os
 import re
 import secrets
 from datetime import date, time, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from uuid import uuid4
 from xml.etree.ElementTree import ParseError
@@ -130,6 +131,10 @@ MEDICATION_INTAKE_TIMINGS = {
     "after_meal",
     "regardless_of_meal",
 }
+MEDICATION_DOSE_UNITS = {"정", "캡슐", "포"}
+MEDICATION_DOSE_AMOUNT_PATTERN = re.compile(
+    r"^[0-9]+(?:\.[0-9]+)?$"
+)
 MEDICATION_TIME_PATTERN = re.compile(
     r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$"
 )
@@ -329,21 +334,34 @@ def validate_medication_schedule_form(form_data):
     errors = []
     validated_data = {}
     dose_amount_text = form_data["dose_amount_text"].strip()
-    dose_unit_text = form_data["dose_unit_text"].strip()
+    dose_unit_text = form_data["dose_unit_text"]
 
     if not dose_amount_text:
         errors.append("복용량을 입력해주세요.")
     elif len(dose_amount_text) > 100:
         errors.append("복용량은 100자 이하로 입력해주세요.")
     else:
-        validated_data["dose_amount_text"] = dose_amount_text
+        try:
+            dose_amount = Decimal(dose_amount_text)
+        except InvalidOperation:
+            dose_amount = None
 
-    if not dose_unit_text:
-        errors.append("복용 단위를 입력해주세요.")
-    elif len(dose_unit_text) > 100:
-        errors.append("복용 단위는 100자 이하로 입력해주세요.")
-    else:
+        if (
+            not MEDICATION_DOSE_AMOUNT_PATTERN.fullmatch(
+                dose_amount_text
+            )
+            or dose_amount is None
+            or not dose_amount.is_finite()
+            or dose_amount <= 0
+        ):
+            errors.append("복용량은 0보다 큰 숫자로 입력해주세요.")
+        else:
+            validated_data["dose_amount_text"] = dose_amount_text
+
+    if dose_unit_text in MEDICATION_DOSE_UNITS:
         validated_data["dose_unit_text"] = dose_unit_text
+    else:
+        errors.append("복용 단위를 올바르게 선택해주세요.")
 
     intake_timing = form_data["intake_timing"]
 
