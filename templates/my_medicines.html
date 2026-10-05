@@ -49,6 +49,23 @@
                         상세보기
                     </a>
                 </p>
+                {% if schedule_creation_available.get(
+                    user_medicine.user_medicine_id,
+                    False
+                ) %}
+                    <p>
+                        <a href="{{ url_for(
+                            'new_medication_schedule',
+                            user_medicine_id=(
+                                user_medicine.user_medicine_id
+                            )
+                        ) }}">
+                            복용 설정
+                        </a>
+                    </p>
+                {% else %}
+                    <p>복용 설정됨</p>
+                {% endif %}
                 <form
                     action="{{ url_for(
                         'deactivate_my_medicine',

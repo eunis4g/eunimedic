@@ -5,10 +5,11 @@ import math
 import os
 import re
 import secrets
-from datetime import timedelta, timezone
+from datetime import date, time, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 from xml.etree.ElementTree import ParseError
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import nh3
 
@@ -43,6 +44,8 @@ from api.medicine_api import (
 )
 from models import (
     Medicine,
+    MedicationSchedule,
+    MedicationTime,
     PendingRegistration,
     User,
     UserMedicine,
@@ -50,6 +53,12 @@ from models import (
     utc_now,
 )
 from services.email_service import EmailServiceError, send_verification_email
+from services.medication_schedule_service import (
+    MedicationScheduleCalculationError,
+    calculate_occurrence_summary,
+    normalize_medication_times,
+    validate_plan_capacity,
+)
 
 
 load_dotenv()
@@ -116,6 +125,14 @@ PENDING_REGISTRATION_LIFETIME = timedelta(minutes=30)
 RESEND_COOLDOWN = timedelta(seconds=60)
 MAX_VERIFICATION_ATTEMPTS = 5
 MAX_RESEND_COUNT = 4
+MEDICATION_INTAKE_TIMINGS = {
+    "before_meal",
+    "after_meal",
+    "regardless_of_meal",
+}
+MEDICATION_TIME_PATTERN = re.compile(
+    r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$"
+)
 
 
 class VerificationTokenLogFilter(logging.Filter):
@@ -211,6 +228,215 @@ def as_utc(value):
         return value.replace(tzinfo=timezone.utc)
 
     return value.astimezone(timezone.utc)
+
+
+def get_owned_active_user_medicine(user_medicine_id):
+
+    user_medicine = db.session.scalar(
+        db.select(UserMedicine).where(
+            UserMedicine.user_medicine_id == user_medicine_id,
+            UserMedicine.user_id == current_user.user_id,
+            UserMedicine.is_active.is_(True),
+        )
+    )
+
+    if user_medicine is None:
+        abort(404)
+
+    return user_medicine
+
+
+def get_active_medication_schedule(user_medicine_id):
+
+    return db.session.scalar(
+        db.select(MedicationSchedule).where(
+            MedicationSchedule.user_medicine_id == user_medicine_id,
+            MedicationSchedule.is_active.is_(True),
+        )
+    )
+
+
+def calculate_stored_schedule_summary(
+    schedule,
+    *,
+    reference_at,
+    timezone_name,
+):
+
+    return calculate_occurrence_summary(
+        start_date=schedule.start_date,
+        course_days=schedule.course_days,
+        times=(
+            medication_time.time_of_day
+            for medication_time in schedule.times
+        ),
+        reported_doses_taken_before_tracking=(
+            schedule.reported_doses_taken_before_tracking
+        ),
+        accounted_occurrence_count=(
+            schedule.accounted_occurrence_count
+        ),
+        reminder_tracking_started_at=as_utc(
+            schedule.reminder_tracking_started_at
+        ),
+        reference_at=reference_at,
+        timezone_name=timezone_name,
+    )
+
+
+def get_medication_schedule_form_data():
+
+    return {
+        "dose_amount_text": request.form.get("dose_amount_text", ""),
+        "dose_unit_text": request.form.get("dose_unit_text", ""),
+        "intake_timing": request.form.get("intake_timing", ""),
+        "daily_frequency": request.form.get("daily_frequency", ""),
+        "medication_times": request.form.getlist("medication_times"),
+        "start_date": request.form.get("start_date", ""),
+        "course_days": request.form.get("course_days", ""),
+        "reported_doses_taken_before_tracking": request.form.get(
+            "reported_doses_taken_before_tracking",
+            "",
+        ),
+    }
+
+
+def parse_schedule_integer(value, *, field_label, minimum, errors):
+
+    normalized_value = value.strip()
+
+    if not normalized_value.isdigit():
+        errors.append(f"{field_label}은(는) 정수로 입력해주세요.")
+        return None
+
+    try:
+        parsed_value = int(normalized_value)
+    except ValueError:
+        errors.append(f"{field_label}은(는) 정수로 입력해주세요.")
+        return None
+
+    if parsed_value < minimum:
+        errors.append(
+            f"{field_label}은(는) {minimum} 이상이어야 합니다."
+        )
+        return None
+
+    return parsed_value
+
+
+def validate_medication_schedule_form(form_data):
+
+    errors = []
+    validated_data = {}
+    dose_amount_text = form_data["dose_amount_text"].strip()
+    dose_unit_text = form_data["dose_unit_text"].strip()
+
+    if not dose_amount_text:
+        errors.append("복용량을 입력해주세요.")
+    elif len(dose_amount_text) > 100:
+        errors.append("복용량은 100자 이하로 입력해주세요.")
+    else:
+        validated_data["dose_amount_text"] = dose_amount_text
+
+    if not dose_unit_text:
+        errors.append("복용 단위를 입력해주세요.")
+    elif len(dose_unit_text) > 100:
+        errors.append("복용 단위는 100자 이하로 입력해주세요.")
+    else:
+        validated_data["dose_unit_text"] = dose_unit_text
+
+    intake_timing = form_data["intake_timing"]
+
+    if intake_timing not in MEDICATION_INTAKE_TIMINGS:
+        errors.append("식사와의 관계를 올바르게 선택해주세요.")
+    else:
+        validated_data["intake_timing"] = intake_timing
+
+    daily_frequency = parse_schedule_integer(
+        form_data["daily_frequency"],
+        field_label="하루 복용 횟수",
+        minimum=1,
+        errors=errors,
+    )
+    medication_time_values = form_data["medication_times"]
+    parsed_times = []
+    times_are_valid = True
+
+    if (
+        daily_frequency is not None
+        and len(medication_time_values) != daily_frequency
+    ):
+        errors.append("하루 복용 횟수와 복용 시간 개수가 일치해야 합니다.")
+        times_are_valid = False
+
+    for medication_time_value in medication_time_values:
+        normalized_time = medication_time_value.strip()
+
+        if not MEDICATION_TIME_PATTERN.fullmatch(normalized_time):
+            errors.append("복용 시간은 HH:MM 형식으로 입력해주세요.")
+            times_are_valid = False
+            continue
+
+        parsed_times.append(time.fromisoformat(normalized_time))
+
+    if not medication_time_values:
+        errors.append("복용 시간을 한 개 이상 입력해주세요.")
+        times_are_valid = False
+
+    if times_are_valid:
+        try:
+            validated_data["medication_times"] = (
+                normalize_medication_times(parsed_times)
+            )
+        except MedicationScheduleCalculationError:
+            errors.append("중복되지 않은 복용 시간을 입력해주세요.")
+
+    try:
+        validated_data["start_date"] = date.fromisoformat(
+            form_data["start_date"].strip()
+        )
+    except ValueError:
+        errors.append("복용 시작일을 올바르게 입력해주세요.")
+
+    course_days = parse_schedule_integer(
+        form_data["course_days"],
+        field_label="복용 일수",
+        minimum=1,
+        errors=errors,
+    )
+    reported_doses = parse_schedule_integer(
+        form_data["reported_doses_taken_before_tracking"],
+        field_label="알림 설정 전에 이미 복용한 횟수",
+        minimum=0,
+        errors=errors,
+    )
+
+    if course_days is not None:
+        validated_data["course_days"] = course_days
+
+    if reported_doses is not None:
+        validated_data["reported_doses_taken_before_tracking"] = (
+            reported_doses
+        )
+
+    if (
+        "medication_times" in validated_data
+        and course_days is not None
+        and reported_doses is not None
+    ):
+        try:
+            validate_plan_capacity(
+                times=validated_data["medication_times"],
+                course_days=course_days,
+                reported_doses_taken_before_tracking=reported_doses,
+                accounted_occurrence_count=0,
+            )
+        except MedicationScheduleCalculationError:
+            errors.append(
+                "이미 복용한 횟수는 총 예정 복용 횟수를 초과할 수 없습니다."
+            )
+
+    return validated_data, errors
 
 
 def hash_verification_token(token):
@@ -760,11 +986,199 @@ def my_medicines():
         )
         .order_by(UserMedicine.registered_at.desc())
     ).all()
+    schedule_creation_available = {
+        user_medicine.user_medicine_id: True
+        for user_medicine in user_medicines
+    }
+    user_medicine_ids = list(schedule_creation_available)
+
+    if user_medicine_ids:
+        active_schedules = db.session.scalars(
+            db.select(MedicationSchedule).where(
+                MedicationSchedule.user_medicine_id.in_(
+                    user_medicine_ids
+                ),
+                MedicationSchedule.is_active.is_(True),
+            )
+        ).all()
+        reference_at = utc_now()
+
+        for schedule in active_schedules:
+            try:
+                summary = calculate_stored_schedule_summary(
+                    schedule,
+                    reference_at=reference_at,
+                    timezone_name=current_user.timezone,
+                )
+            except MedicationScheduleCalculationError:
+                schedule_creation_available[
+                    schedule.user_medicine_id
+                ] = False
+            else:
+                schedule_creation_available[
+                    schedule.user_medicine_id
+                ] = summary.remaining == 0
 
     return render_template(
         "my_medicines.html",
         user_medicines=user_medicines,
+        schedule_creation_available=schedule_creation_available,
     )
+
+
+@app.route(
+    "/my-medicines/<int:user_medicine_id>/schedule/new",
+    methods=["GET", "POST"],
+)
+@login_required
+def new_medication_schedule(user_medicine_id):
+
+    user_medicine = get_owned_active_user_medicine(user_medicine_id)
+    operation_time = utc_now()
+    active_schedule = get_active_medication_schedule(user_medicine_id)
+
+    if active_schedule is not None:
+        try:
+            active_summary = calculate_stored_schedule_summary(
+                active_schedule,
+                reference_at=operation_time,
+                timezone_name=current_user.timezone,
+            )
+        except MedicationScheduleCalculationError:
+            flash(
+                "복용 설정 상태를 확인할 수 없습니다. 다시 시도해주세요.",
+                "error",
+            )
+            return redirect(url_for("my_medicines"))
+
+        if active_summary.remaining > 0:
+            flash("이미 진행 중인 복용 설정이 있습니다.", "error")
+            return redirect(url_for("my_medicines"))
+
+    if request.method == "GET":
+        try:
+            user_timezone = ZoneInfo(current_user.timezone)
+        except (ZoneInfoNotFoundError, TypeError, ValueError):
+            flash(
+                "시간대 정보를 확인할 수 없습니다. 다시 시도해주세요.",
+                "error",
+            )
+            return redirect(url_for("my_medicines"))
+
+        form_data = {
+            "dose_amount_text": "",
+            "dose_unit_text": "",
+            "intake_timing": "regardless_of_meal",
+            "daily_frequency": "1",
+            "medication_times": ["09:00"],
+            "start_date": operation_time.astimezone(
+                user_timezone
+            ).date().isoformat(),
+            "course_days": "1",
+            "reported_doses_taken_before_tracking": "0",
+        }
+
+        return render_template(
+            "medication_schedule_form.html",
+            user_medicine=user_medicine,
+            form_data=form_data,
+            errors=[],
+        )
+
+    form_data = get_medication_schedule_form_data()
+    validated_data, errors = validate_medication_schedule_form(form_data)
+
+    if not errors:
+        try:
+            new_summary = calculate_occurrence_summary(
+                start_date=validated_data["start_date"],
+                course_days=validated_data["course_days"],
+                times=validated_data["medication_times"],
+                reported_doses_taken_before_tracking=(
+                    validated_data[
+                        "reported_doses_taken_before_tracking"
+                    ]
+                ),
+                accounted_occurrence_count=0,
+                reminder_tracking_started_at=operation_time,
+                reference_at=operation_time,
+                timezone_name=current_user.timezone,
+            )
+        except MedicationScheduleCalculationError:
+            errors.append(
+                "복용 설정을 계산할 수 없습니다. 입력값과 시간대를 확인해주세요."
+            )
+
+    if errors:
+        return (
+            render_template(
+                "medication_schedule_form.html",
+                user_medicine=user_medicine,
+                form_data=form_data,
+                errors=errors,
+            ),
+            400,
+        )
+
+    if active_schedule is not None:
+        active_schedule.is_active = False
+
+        try:
+            db.session.flush()
+        except SQLAlchemyError:
+            db.session.rollback()
+            flash(
+                "복용 설정을 저장하지 못했습니다. 다시 시도해주세요.",
+                "error",
+            )
+            return redirect(url_for("my_medicines"))
+
+    schedule = MedicationSchedule(
+        user_medicine_id=user_medicine.user_medicine_id,
+        intake_timing=validated_data["intake_timing"],
+        dose_amount_text=validated_data["dose_amount_text"],
+        dose_unit_text=validated_data["dose_unit_text"],
+        instructions=None,
+        start_date=validated_data["start_date"],
+        end_date=None,
+        course_days=validated_data["course_days"],
+        reported_doses_taken_before_tracking=(
+            validated_data["reported_doses_taken_before_tracking"]
+        ),
+        reminder_tracking_started_at=operation_time,
+        accounted_occurrence_count=0,
+        monday=True,
+        tuesday=True,
+        wednesday=True,
+        thursday=True,
+        friday=True,
+        saturday=True,
+        sunday=True,
+        is_active=new_summary.remaining > 0,
+    )
+    schedule.times.extend(
+        MedicationTime(time_of_day=medication_time)
+        for medication_time in validated_data["medication_times"]
+    )
+    db.session.add(schedule)
+
+    try:
+        db.session.flush()
+        db.session.commit()
+    except (IntegrityError, SQLAlchemyError):
+        db.session.rollback()
+        flash(
+            "복용 설정을 저장하지 못했습니다. 다시 시도해주세요.",
+            "error",
+        )
+        return redirect(url_for("my_medicines"))
+
+    if new_summary.remaining == 0:
+        flash("복용 기록이 저장되었습니다.", "success")
+    else:
+        flash("복용 설정이 저장되었습니다.", "success")
+
+    return redirect(url_for("my_medicines"))
 
 
 @app.route("/my-medicines/add", methods=["GET"])

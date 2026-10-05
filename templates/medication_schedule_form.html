@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+    <meta charset="UTF-8">
+    <title>복용 설정</title>
+</head>
+
+<body>
+
+    <h1>복용 설정</h1>
+    <p>{{ user_medicine.medicine.item_name }}</p>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            <section aria-label="알림 메시지">
+                {% for category, message in messages %}
+                    <p role="{{ 'alert' if category == 'error' else 'status' }}">
+                        {{ message }}
+                    </p>
+                {% endfor %}
+            </section>
+        {% endif %}
+    {% endwith %}
+
+    {% if errors %}
+        <section aria-label="입력 오류">
+            <h2>입력 내용을 확인해주세요.</h2>
+            <ul>
+                {% for error in errors %}
+                    <li>{{ error }}</li>
+                {% endfor %}
+            </ul>
+        </section>
+    {% endif %}
+
+    <form method="POST">
+        <input
+            type="hidden"
+            name="csrf_token"
+            value="{{ csrf_token() }}"
+        >
+
+        <p>
+            <label for="dose_amount_text">복용량</label>
+            <input
+                id="dose_amount_text"
+                name="dose_amount_text"
+                type="text"
+                maxlength="100"
+                value="{{ form_data.dose_amount_text }}"
+                required
+            >
+        </p>
+
+        <p>
+            <label for="dose_unit_text">복용 단위</label>
+            <input
+                id="dose_unit_text"
+                name="dose_unit_text"
+                type="text"
+                maxlength="100"
+                value="{{ form_data.dose_unit_text }}"
+                required
+            >
+        </p>
+
+        <p>
+            <label for="intake_timing">식사와의 관계</label>
+            <select id="intake_timing" name="intake_timing" required>
+                <option
+                    value="before_meal"
+                    {% if form_data.intake_timing == 'before_meal' %}selected{% endif %}
+                >식전</option>
+                <option
+                    value="after_meal"
+                    {% if form_data.intake_timing == 'after_meal' %}selected{% endif %}
+                >식후</option>
+                <option
+                    value="regardless_of_meal"
+                    {% if form_data.intake_timing == 'regardless_of_meal' %}selected{% endif %}
+                >식사와 관계없음</option>
+            </select>
+        </p>
+
+        <fieldset>
+            <legend>하루 복용 횟수</legend>
+            <button
+                id="decrease-frequency"
+                type="button"
+                aria-label="하루 복용 횟수 줄이기"
+            >-</button>
+            <input
+                id="daily_frequency"
+                name="daily_frequency"
+                type="number"
+                min="1"
+                step="1"
+                value="{{ form_data.daily_frequency }}"
+                required
+            >
+            <button
+                id="increase-frequency"
+                type="button"
+                aria-label="하루 복용 횟수 늘리기"
+            >+</button>
+        </fieldset>
+
+        <fieldset>
+            <legend>복용 시간</legend>
+            <div id="medication-times">
+                {% for medication_time in form_data.medication_times %}
+                    <p>
+                        <label>
+                            {{ loop.index }}회
+                            <input
+                                name="medication_times"
+                                type="time"
+                                value="{{ medication_time }}"
+                                required
+                            >
+                        </label>
+                    </p>
+                {% endfor %}
+            </div>
+        </fieldset>
+
+        <p>
+            <label for="start_date">복용 시작일</label>
+            <input
+                id="start_date"
+                name="start_date"
+                type="date"
+                value="{{ form_data.start_date }}"
+                required
+            >
+        </p>
+
+        <p>
+            <label for="course_days">복용 일수</label>
+            <input
+                id="course_days"
+                name="course_days"
+                type="number"
+                min="1"
+                step="1"
+                value="{{ form_data.course_days }}"
+                required
+            >
+        </p>
+
+        <p>
+            <label for="reported_doses_taken_before_tracking">
+                알림 설정 전에 이미 복용한 횟수
+            </label>
+            <input
+                id="reported_doses_taken_before_tracking"
+                name="reported_doses_taken_before_tracking"
+                type="number"
+                min="0"
+                step="1"
+                value="{{ form_data.reported_doses_taken_before_tracking }}"
+                required
+            >
+        </p>
+        <p>
+            알림 설정 전에 이미 복용한 횟수가 있다면 입력하세요.
+        </p>
+
+        <p id="planned-total" aria-live="polite"></p>
+
+        <button type="submit">저장</button>
+    </form>
+
+    <p>
+        <a href="{{ url_for('my_medicines') }}">내 복용약으로 돌아가기</a>
+    </p>
+
+    <script>
+        (() => {
+            const frequencyInput = document.getElementById("daily_frequency");
+            const courseDaysInput = document.getElementById("course_days");
+            const timesContainer = document.getElementById("medication-times");
+            const plannedTotal = document.getElementById("planned-total");
+
+            function readPositiveInteger(input) {
+                const value = Number(input.value);
+                return Number.isSafeInteger(value) && value >= 1
+                    ? value
+                    : null;
+            }
+
+            function updatePlannedTotal() {
+                const frequency = readPositiveInteger(frequencyInput);
+                const courseDays = readPositiveInteger(courseDaysInput);
+
+                plannedTotal.textContent = frequency && courseDays
+                    ? `하루 ${frequency}회 × ${courseDays}일 = 총 예정 복용 ${frequency * courseDays}회`
+                    : "";
+            }
+
+            function rebuildTimeInputs() {
+                const frequency = readPositiveInteger(frequencyInput);
+
+                if (!frequency) {
+                    updatePlannedTotal();
+                    return;
+                }
+
+                const existingValues = Array.from(
+                    timesContainer.querySelectorAll("input")
+                ).map((input) => input.value);
+                const fragment = document.createDocumentFragment();
+
+                for (let index = 0; index < frequency; index += 1) {
+                    const row = document.createElement("p");
+                    const label = document.createElement("label");
+                    const input = document.createElement("input");
+
+                    label.append(`${index + 1}회 `);
+                    input.name = "medication_times";
+                    input.type = "time";
+                    input.required = true;
+                    input.value = existingValues[index] || "09:00";
+                    label.append(input);
+                    row.append(label);
+                    fragment.append(row);
+                }
+
+                timesContainer.replaceChildren(fragment);
+                updatePlannedTotal();
+            }
+
+            document.getElementById("decrease-frequency").addEventListener(
+                "click",
+                () => {
+                    const frequency = readPositiveInteger(frequencyInput) || 1;
+                    frequencyInput.value = Math.max(1, frequency - 1);
+                    rebuildTimeInputs();
+                }
+            );
+            document.getElementById("increase-frequency").addEventListener(
+                "click",
+                () => {
+                    const frequency = readPositiveInteger(frequencyInput) || 1;
+                    frequencyInput.value = frequency + 1;
+                    rebuildTimeInputs();
+                }
+            );
+            frequencyInput.addEventListener("change", rebuildTimeInputs);
+            courseDaysInput.addEventListener("input", updatePlannedTotal);
+            rebuildTimeInputs();
+        })();
+    </script>
+
+</body>
+
+</html>
