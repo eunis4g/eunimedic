@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 from flask_login import UserMixin
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import event
+from sqlalchemy import event, text
 from sqlalchemy.engine import Engine
 
 
@@ -298,6 +298,26 @@ class MedicationSchedule(db.Model):
         db.Date,
         nullable=True,
     )
+    course_days = db.Column(
+        db.Integer,
+        nullable=False,
+    )
+    reported_doses_taken_before_tracking = db.Column(
+        db.Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    reminder_tracking_started_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+    )
+    accounted_occurrence_count = db.Column(
+        db.Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
     monday = db.Column(
         db.Boolean,
         nullable=False,
@@ -360,13 +380,36 @@ class MedicationSchedule(db.Model):
 
     __table_args__ = (
         db.CheckConstraint(
+            "intake_timing IN "
+            "('before_meal', 'after_meal', 'regardless_of_meal')",
+            name="ck_medication_schedule_intake_timing",
+        ),
+        db.CheckConstraint(
             "end_date IS NULL OR end_date >= start_date",
             name="ck_medication_schedule_date_range",
+        ),
+        db.CheckConstraint(
+            "course_days >= 1",
+            name="ck_medication_schedule_course_days",
+        ),
+        db.CheckConstraint(
+            "reported_doses_taken_before_tracking >= 0",
+            name="ck_medication_schedule_reported_doses",
+        ),
+        db.CheckConstraint(
+            "accounted_occurrence_count >= 0",
+            name="ck_medication_schedule_accounted_occurrences",
         ),
         db.CheckConstraint(
             "monday OR tuesday OR wednesday OR thursday "
             "OR friday OR saturday OR sunday",
             name="ck_medication_schedule_weekday",
+        ),
+        db.Index(
+            "uq_active_medication_schedule_per_user_medicine",
+            "user_medicine_id",
+            unique=True,
+            sqlite_where=text("is_active = 1"),
         ),
     )
 
