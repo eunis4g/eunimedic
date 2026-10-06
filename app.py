@@ -47,7 +47,10 @@ from api.medicine_api import (
 )
 from models import (
     Medicine,
+    MedicationPlan,
+    MedicationPlanTime,
     MedicationSchedule,
+    MedicationSchedulePlanTime,
     MedicationTime,
     PendingRegistration,
     User,
@@ -269,6 +272,32 @@ def get_active_medication_schedule(user_medicine_id):
     )
 
 
+def get_current_active_medication_plan():
+
+    return db.session.scalar(
+        db.select(MedicationPlan).where(
+            MedicationPlan.user_id == current_user.user_id,
+            MedicationPlan.is_active.is_(True),
+        )
+    )
+
+
+def get_owned_active_medication_plan(plan_id):
+
+    plan = db.session.scalar(
+        db.select(MedicationPlan).where(
+            MedicationPlan.plan_id == plan_id,
+            MedicationPlan.user_id == current_user.user_id,
+            MedicationPlan.is_active.is_(True),
+        )
+    )
+
+    if plan is None:
+        abort(404)
+
+    return plan
+
+
 def get_owned_medication_schedule(schedule_id):
 
     schedule = db.session.scalar(
@@ -314,6 +343,33 @@ def get_owned_editable_medication_schedule(schedule_id):
 def serialize_schedule_version(value):
 
     return as_utc(value).isoformat(timespec="microseconds")
+
+
+def serialize_medication_plan_version(value):
+
+    return as_utc(value).isoformat(timespec="microseconds")
+
+
+def claim_medication_plan_change(
+    plan,
+    *,
+    old_updated_at,
+    action_time,
+):
+
+    result = db.session.execute(
+        update(MedicationPlan)
+        .where(
+            MedicationPlan.plan_id == plan.plan_id,
+            MedicationPlan.user_id == current_user.user_id,
+            MedicationPlan.is_active.is_(True),
+            MedicationPlan.updated_at == old_updated_at,
+        )
+        .values(updated_at=action_time)
+        .execution_options(synchronize_session=False)
+    )
+
+    return result.rowcount == 1
 
 
 def claim_medication_schedule_edit(
@@ -512,6 +568,16 @@ def parse_schedule_integer(value, *, field_label, minimum, errors):
     return parsed_value
 
 
+def parse_medication_time(value):
+
+    normalized_time = (value or "").strip()
+
+    if not MEDICATION_TIME_PATTERN.fullmatch(normalized_time):
+        return None
+
+    return time.fromisoformat(normalized_time)
+
+
 def validate_medication_schedule_form(
     form_data,
     *,
@@ -575,14 +641,14 @@ def validate_medication_schedule_form(
         times_are_valid = False
 
     for medication_time_value in medication_time_values:
-        normalized_time = medication_time_value.strip()
+        parsed_time = parse_medication_time(medication_time_value)
 
-        if not MEDICATION_TIME_PATTERN.fullmatch(normalized_time):
+        if parsed_time is None:
             errors.append("복용 시간은 HH:MM 형식으로 입력해주세요.")
             times_are_valid = False
             continue
 
-        parsed_times.append(time.fromisoformat(normalized_time))
+        parsed_times.append(parsed_time)
 
     if not medication_time_values:
         errors.append("복용 시간을 한 개 이상 입력해주세요.")
@@ -1178,6 +1244,262 @@ def logout():
     flash("로그아웃되었습니다.", "success")
 
     return redirect(url_for("home"))
+
+
+@app.route("/my-medication-plan", methods=["GET"])
+@login_required
+def my_medication_plan():
+
+    plan = get_current_active_medication_plan()
+    plan_times = []
+    plan_version = None
+
+    if plan is not None:
+        plan_times = db.session.scalars(
+            db.select(MedicationPlanTime)
+            .where(MedicationPlanTime.plan_id == plan.plan_id)
+            .order_by(MedicationPlanTime.time_of_day.asc())
+        ).all()
+        plan_version = serialize_medication_plan_version(
+            plan.updated_at
+        )
+
+    return render_template(
+        "medication_plan.html",
+        plan=plan,
+        plan_times=plan_times,
+        plan_version=plan_version,
+    )
+
+
+@app.route("/medication-plans", methods=["POST"])
+@login_required
+def create_medication_plan():
+
+    if get_current_active_medication_plan() is not None:
+        flash("이미 사용 중인 복용약 일정이 있습니다.", "info")
+        return redirect(url_for("my_medication_plan"))
+
+    plan = MedicationPlan(
+        user_id=current_user.user_id,
+        is_active=True,
+    )
+
+    try:
+        db.session.add(plan)
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+
+        if get_current_active_medication_plan() is not None:
+            flash("이미 사용 중인 복용약 일정이 있습니다.", "info")
+        else:
+            flash(
+                "복용약 일정을 만들지 못했습니다. 다시 시도해주세요.",
+                "error",
+            )
+
+        return redirect(url_for("my_medication_plan"))
+    except SQLAlchemyError:
+        db.session.rollback()
+        flash(
+            "복용약 일정을 만들지 못했습니다. 다시 시도해주세요.",
+            "error",
+        )
+        return redirect(url_for("my_medication_plan"))
+
+    flash("복용약 일정이 만들어졌습니다.", "success")
+    return redirect(url_for("my_medication_plan"))
+
+
+@app.route(
+    "/medication-plans/<int:plan_id>/times",
+    methods=["POST"],
+)
+@login_required
+def add_medication_plan_time(plan_id):
+
+    plan = get_owned_active_medication_plan(plan_id)
+    action_time = utc_now()
+    old_updated_at = plan.updated_at
+    current_plan_version = serialize_medication_plan_version(
+        old_updated_at
+    )
+
+    if request.form.get("plan_version", "") != current_plan_version:
+        db.session.rollback()
+        flash(
+            "다른 요청에서 복용 일정이 변경되었습니다. "
+            "최신 내용을 확인해주세요.",
+            "error",
+        )
+        return redirect(url_for("my_medication_plan"))
+
+    parsed_time = parse_medication_time(
+        request.form.get("time_of_day", "")
+    )
+
+    if parsed_time is None:
+        flash("복용 시간을 HH:MM 형식으로 입력해주세요.", "error")
+        return redirect(url_for("my_medication_plan"))
+
+    duplicate = db.session.scalar(
+        db.select(MedicationPlanTime.plan_time_id).where(
+            MedicationPlanTime.plan_id == plan.plan_id,
+            MedicationPlanTime.time_of_day == parsed_time,
+        )
+    )
+
+    if duplicate is not None:
+        flash("이미 등록된 복용 시간입니다.", "error")
+        return redirect(url_for("my_medication_plan"))
+
+    try:
+        claimed = claim_medication_plan_change(
+            plan,
+            old_updated_at=old_updated_at,
+            action_time=action_time,
+        )
+
+        if not claimed:
+            db.session.rollback()
+            flash(
+                "다른 요청에서 복용 일정이 변경되었습니다. "
+                "최신 내용을 확인해주세요.",
+                "error",
+            )
+            return redirect(url_for("my_medication_plan"))
+
+        db.session.add(
+            MedicationPlanTime(
+                plan_id=plan.plan_id,
+                time_of_day=parsed_time,
+                created_at=action_time,
+            )
+        )
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        duplicate = db.session.scalar(
+            db.select(MedicationPlanTime.plan_time_id).where(
+                MedicationPlanTime.plan_id == plan.plan_id,
+                MedicationPlanTime.time_of_day == parsed_time,
+            )
+        )
+
+        if duplicate is not None:
+            flash("이미 등록된 복용 시간입니다.", "error")
+        else:
+            flash(
+                "복용 시간을 추가하지 못했습니다. "
+                "최신 내용을 확인해주세요.",
+                "error",
+            )
+
+        return redirect(url_for("my_medication_plan"))
+    except SQLAlchemyError:
+        db.session.rollback()
+        flash(
+            "복용 시간을 추가하지 못했습니다. 다시 시도해주세요.",
+            "error",
+        )
+        return redirect(url_for("my_medication_plan"))
+
+    flash("복용 시간이 추가되었습니다.", "success")
+    return redirect(url_for("my_medication_plan"))
+
+
+@app.route(
+    "/medication-plans/<int:plan_id>/times/"
+    "<int:plan_time_id>/delete",
+    methods=["POST"],
+)
+@login_required
+def delete_medication_plan_time(plan_id, plan_time_id):
+
+    plan = get_owned_active_medication_plan(plan_id)
+    plan_time = db.session.scalar(
+        db.select(MedicationPlanTime).where(
+            MedicationPlanTime.plan_time_id == plan_time_id,
+            MedicationPlanTime.plan_id == plan.plan_id,
+        )
+    )
+
+    if plan_time is None:
+        abort(404)
+
+    action_time = utc_now()
+    old_updated_at = plan.updated_at
+    current_plan_version = serialize_medication_plan_version(
+        old_updated_at
+    )
+
+    if request.form.get("plan_version", "") != current_plan_version:
+        db.session.rollback()
+        flash(
+            "다른 요청에서 복용 일정이 변경되었습니다. "
+            "최신 내용을 확인해주세요.",
+            "error",
+        )
+        return redirect(url_for("my_medication_plan"))
+
+    active_schedule_id = db.session.scalar(
+        db.select(MedicationSchedulePlanTime.schedule_id)
+        .join(
+            MedicationSchedule,
+            (
+                MedicationSchedule.plan_id
+                == MedicationSchedulePlanTime.plan_id
+            )
+            & (
+                MedicationSchedule.schedule_id
+                == MedicationSchedulePlanTime.schedule_id
+            ),
+        )
+        .where(
+            MedicationSchedulePlanTime.plan_id == plan.plan_id,
+            MedicationSchedulePlanTime.plan_time_id == plan_time_id,
+            MedicationSchedule.is_active.is_(True),
+        )
+        .limit(1)
+    )
+
+    if active_schedule_id is not None:
+        flash(
+            "이 시간은 현재 복용 일정에서 사용 중이므로 "
+            "삭제할 수 없습니다.",
+            "error",
+        )
+        return redirect(url_for("my_medication_plan"))
+
+    try:
+        claimed = claim_medication_plan_change(
+            plan,
+            old_updated_at=old_updated_at,
+            action_time=action_time,
+        )
+
+        if not claimed:
+            db.session.rollback()
+            flash(
+                "다른 요청에서 복용 일정이 변경되었습니다. "
+                "최신 내용을 확인해주세요.",
+                "error",
+            )
+            return redirect(url_for("my_medication_plan"))
+
+        db.session.delete(plan_time)
+        db.session.commit()
+    except (IntegrityError, SQLAlchemyError):
+        db.session.rollback()
+        flash(
+            "복용 시간을 삭제하지 못했습니다. 다시 시도해주세요.",
+            "error",
+        )
+        return redirect(url_for("my_medication_plan"))
+
+    flash("복용 시간이 삭제되었습니다.", "success")
+    return redirect(url_for("my_medication_plan"))
 
 
 @app.route("/my-medicines", methods=["GET"])

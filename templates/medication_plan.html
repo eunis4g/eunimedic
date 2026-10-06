@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+    <meta charset="UTF-8">
+    <title>내 복용약 일정</title>
+</head>
+
+<body>
+
+    <h1>내 복용약 일정</h1>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            <section aria-label="알림 메시지">
+                {% for category, message in messages %}
+                    <p role="{{ 'alert' if category == 'error' else 'status' }}">
+                        {{ message }}
+                    </p>
+                {% endfor %}
+            </section>
+        {% endif %}
+    {% endwith %}
+
+    {% if plan is none %}
+        <p>아직 만든 복용약 일정이 없습니다.</p>
+        <form method="POST" action="{{ url_for('create_medication_plan') }}">
+            <input
+                type="hidden"
+                name="csrf_token"
+                value="{{ csrf_token() }}"
+            >
+            <button type="submit">새 복용 일정 만들기</button>
+        </form>
+    {% else %}
+        <section aria-labelledby="medication-plan-times-heading">
+            <h2 id="medication-plan-times-heading">복용 시간</h2>
+            <p>복용 시간은 일정에 약을 추가할 때 선택할 수 있습니다.</p>
+
+            {% if plan_times %}
+                <ul>
+                    {% for plan_time in plan_times %}
+                        <li data-plan-time-id="{{ plan_time.plan_time_id }}">
+                            <time datetime="{{ plan_time.time_of_day.strftime('%H:%M') }}">
+                                {{ plan_time.time_of_day.strftime('%H:%M') }}
+                            </time>
+                            <form
+                                method="POST"
+                                action="{{ url_for(
+                                    'delete_medication_plan_time',
+                                    plan_id=plan.plan_id,
+                                    plan_time_id=plan_time.plan_time_id
+                                ) }}"
+                            >
+                                <input
+                                    type="hidden"
+                                    name="csrf_token"
+                                    value="{{ csrf_token() }}"
+                                >
+                                <input
+                                    type="hidden"
+                                    name="plan_version"
+                                    value="{{ plan_version }}"
+                                >
+                                <button type="submit">삭제</button>
+                            </form>
+                        </li>
+                    {% endfor %}
+                </ul>
+            {% else %}
+                <p>등록된 복용 시간이 없습니다.</p>
+            {% endif %}
+
+            <form
+                method="POST"
+                action="{{ url_for(
+                    'add_medication_plan_time',
+                    plan_id=plan.plan_id
+                ) }}"
+            >
+                <input
+                    type="hidden"
+                    name="csrf_token"
+                    value="{{ csrf_token() }}"
+                >
+                <input
+                    type="hidden"
+                    name="plan_version"
+                    value="{{ plan_version }}"
+                >
+                <label for="time_of_day">시간 입력</label>
+                <input
+                    id="time_of_day"
+                    name="time_of_day"
+                    type="text"
+                    inputmode="numeric"
+                    placeholder="HH:MM"
+                    pattern="[0-9]{2}:[0-9]{2}"
+                    maxlength="5"
+                    required
+                >
+                <button type="submit">+ 복용 시간 추가</button>
+            </form>
+        </section>
+    {% endif %}
+
+    <p><a href="{{ url_for('my_medicines') }}">내 복용약으로 이동</a></p>
+    <p><a href="{{ url_for('home') }}">홈으로 이동</a></p>
+
+</body>
+
+</html>
