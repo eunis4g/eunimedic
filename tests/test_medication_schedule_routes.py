@@ -7,7 +7,7 @@ from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from flask import g
-from sqlalchemy import create_engine, inspect as sqlalchemy_inspect
+from sqlalchemy import create_engine, event, inspect as sqlalchemy_inspect
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 import app as app_module
@@ -147,6 +147,15 @@ class MedicationScheduleRouteTest(unittest.TestCase):
     def edit_url(self, schedule_id):
         return f"/medication-schedules/{schedule_id}/edit"
 
+    def restart_url(self, schedule_id):
+        return f"/medication-schedules/{schedule_id}/restart"
+
+    def history_url(self, user_medicine_id=None):
+        return (
+            "/my-medicines/"
+            f"{user_medicine_id or self.user_medicine_id}/history"
+        )
+
     def log_in(self):
         with self.client.session_transaction() as session:
             session["_user_id"] = str(self.user_id)
@@ -200,6 +209,7 @@ class MedicationScheduleRouteTest(unittest.TestCase):
         dose_unit_text="정",
         intake_timing="after_meal",
         setup_pending=False,
+        created_at=None,
     ):
         user_medicine = db.session.get(
             UserMedicine,
@@ -235,6 +245,9 @@ class MedicationScheduleRouteTest(unittest.TestCase):
             MedicationTime(time_of_day=value)
             for value in medication_times
         )
+        if created_at is not None:
+            schedule.created_at = created_at
+            schedule.updated_at = created_at
         db.session.add(schedule)
         db.session.commit()
         return schedule
@@ -273,6 +286,16 @@ class MedicationScheduleRouteTest(unittest.TestCase):
             self.edit_url(schedule.schedule_id),
             data=payload,
         )
+
+    def post_restart(self, schedule, form_data=None, *, token=None):
+        restart_url = self.restart_url(schedule.schedule_id)
+
+        if token is None:
+            token = self.get_csrf_token(restart_url)
+
+        payload = form_data or self.valid_form_data()
+        payload["csrf_token"] = token
+        return self.client.post(restart_url, data=payload)
 
     def test_login_is_required_for_get_and_post(self):
         get_response = self.client.get(self.schedule_url)
@@ -904,6 +927,487 @@ class MedicationScheduleRouteTest(unittest.TestCase):
             db.session.query(MedicationSchedule).count(),
             0,
         )
+
+    def test_restart_login_is_required_for_get_and_post(self):
+        schedule = self.add_schedule(active=False)
+        restart_url = self.restart_url(schedule.schedule_id)
+
+        get_response = self.client.get(restart_url)
+        self.assertEqual(get_response.status_code, 302)
+        self.assertIn("/login", get_response.headers["Location"])
+
+        login_page = self.client.get("/login")
+        token_match = re.search(
+            rb'name="csrf_token"\s+value="([^"]+)"',
+            login_page.data,
+        )
+        self.assertIsNotNone(token_match)
+        form_data = self.valid_form_data()
+        form_data["csrf_token"] = token_match.group(1).decode("utf-8")
+        post_response = self.client.post(restart_url, data=form_data)
+        self.assertEqual(post_response.status_code, 302)
+        self.assertIn("/login", post_response.headers["Location"])
+
+    def test_restart_hides_missing_and_other_users_schedules(self):
+        other_schedule = self.add_schedule(
+            user_medicine_id=self.other_user_medicine_id,
+            active=False,
+        )
+        self.log_in()
+        token = self.get_csrf_token("/my-medicines")
+
+        for schedule_id in (other_schedule.schedule_id, 999_999):
+            with self.subTest(method="GET", schedule_id=schedule_id):
+                response = self.client.get(self.restart_url(schedule_id))
+                self.assertEqual(response.status_code, 404)
+
+            with self.subTest(method="POST", schedule_id=schedule_id):
+                form_data = self.valid_form_data()
+                form_data["csrf_token"] = token
+                response = self.client.post(
+                    self.restart_url(schedule_id),
+                    data=form_data,
+                )
+                self.assertEqual(response.status_code, 404)
+
+    def test_restart_get_copies_only_reference_values_without_writing(self):
+        source = self.add_schedule(
+            user_medicine_id=self.inactive_user_medicine_id,
+            start_date_value=date(2025, 1, 2),
+            course_days=14,
+            medication_times=(time(20, 0), time(8, 30)),
+            reported=3,
+            accounted=2,
+            active=False,
+            dose_amount_text="0.5",
+            dose_unit_text="포",
+            intake_timing="before_meal",
+        )
+        source_id = source.schedule_id
+        source_snapshot = (
+            source.is_active,
+            source.start_date,
+            source.course_days,
+            source.reported_doses_taken_before_tracking,
+            source.accounted_occurrence_count,
+            source.reminder_tracking_started_at,
+            source.updated_at,
+            [
+                (value.medication_time_id, value.time_of_day)
+                for value in source.times
+            ],
+        )
+        self.log_in()
+        fixed_time = datetime(2026, 10, 6, 15, 30, tzinfo=UTC)
+
+        with patch.object(app_module, "utc_now", return_value=fixed_time):
+            response = self.client.get(self.restart_url(source_id))
+
+        self.assertEqual(response.status_code, 200)
+        html = response.data.decode("utf-8")
+        for expected in (
+            "다시 복용하기",
+            "이전 복용 설정을 참고해 새 복용 과정을 시작합니다.",
+            'value="0.5"',
+            'value="08:30"',
+            'value="20:00"',
+            'value="2026-10-07"',
+            'value="0"',
+            "새 복용 일정 시작",
+        ):
+            self.assertIn(expected, html)
+        self.assertRegex(
+            html,
+            r'id="dose_unit_text"[\s\S]*value="포"\s+selected',
+        )
+        self.assertRegex(
+            html,
+            r'id="intake_timing"[\s\S]*value="before_meal"\s+selected',
+        )
+        self.assertRegex(
+            html,
+            r'id="course_days"[\s\S]*?value=""',
+        )
+        self.assertNotIn('value="14"', html)
+
+        db.session.expire_all()
+        stored_user_medicine = db.session.get(
+            UserMedicine,
+            self.inactive_user_medicine_id,
+        )
+        stored_source = db.session.get(MedicationSchedule, source_id)
+        self.assertFalse(stored_user_medicine.is_active)
+        self.assertFalse(stored_user_medicine.schedule_setup_pending)
+        self.assertEqual(
+            (
+                stored_source.is_active,
+                stored_source.start_date,
+                stored_source.course_days,
+                stored_source.reported_doses_taken_before_tracking,
+                stored_source.accounted_occurrence_count,
+                stored_source.reminder_tracking_started_at,
+                stored_source.updated_at,
+                [
+                    (value.medication_time_id, value.time_of_day)
+                    for value in stored_source.times
+                ],
+            ),
+            source_snapshot,
+        )
+
+    def test_restart_creates_new_schedule_and_reactivates_medicine(self):
+        source = self.add_schedule(
+            user_medicine_id=self.inactive_user_medicine_id,
+            medication_times=(time(8, 0), time(20, 0)),
+            reported=2,
+            accounted=1,
+            active=True,
+            dose_amount_text="0.5",
+            dose_unit_text="캡슐",
+            intake_timing="before_meal",
+        )
+        source_id = source.schedule_id
+        source_time_rows = [
+            (value.medication_time_id, value.time_of_day)
+            for value in source.times
+        ]
+        self.log_in()
+        token = self.get_csrf_token(self.restart_url(source_id))
+        restart_time = datetime(2026, 10, 6, 6, 0, tzinfo=UTC)
+        form_data = self.valid_form_data(
+            dose_amount_text="1.5",
+            dose_unit_text="포",
+            intake_timing="regardless_of_meal",
+            daily_frequency="2",
+            medication_times=["21:00", "09:00"],
+            start_date="2026-10-07",
+            course_days="4",
+            reported_doses_taken_before_tracking="1",
+        )
+
+        with patch.object(app_module, "utc_now", return_value=restart_time):
+            response = self.post_restart(source, form_data, token=token)
+
+        self.assertEqual(response.status_code, 302)
+        db.session.expire_all()
+        stored_user_medicine = db.session.get(
+            UserMedicine,
+            self.inactive_user_medicine_id,
+        )
+        schedules = db.session.scalars(
+            db.select(MedicationSchedule)
+            .where(
+                MedicationSchedule.user_medicine_id
+                == self.inactive_user_medicine_id
+            )
+            .order_by(MedicationSchedule.schedule_id)
+        ).all()
+        self.assertEqual(len(schedules), 2)
+        stored_source, new_schedule = schedules
+        self.assertEqual(stored_source.schedule_id, source_id)
+        self.assertFalse(stored_source.is_active)
+        self.assertEqual(
+            [
+                (value.medication_time_id, value.time_of_day)
+                for value in stored_source.times
+            ],
+            source_time_rows,
+        )
+        self.assertEqual(stored_source.dose_amount_text, "0.5")
+        self.assertEqual(stored_source.accounted_occurrence_count, 1)
+        self.assertTrue(stored_user_medicine.is_active)
+        self.assertFalse(stored_user_medicine.schedule_setup_pending)
+        self.assertTrue(new_schedule.is_active)
+        self.assertEqual(new_schedule.dose_amount_text, "1.5")
+        self.assertEqual(new_schedule.dose_unit_text, "포")
+        self.assertEqual(
+            new_schedule.intake_timing,
+            "regardless_of_meal",
+        )
+        self.assertEqual(new_schedule.start_date, date(2026, 10, 7))
+        self.assertEqual(new_schedule.course_days, 4)
+        self.assertEqual(
+            new_schedule.reported_doses_taken_before_tracking,
+            1,
+        )
+        self.assertEqual(new_schedule.accounted_occurrence_count, 0)
+        self.assertEqual(
+            app_module.as_utc(new_schedule.reminder_tracking_started_at),
+            restart_time,
+        )
+        self.assertEqual(
+            [value.time_of_day for value in new_schedule.times],
+            [time(9, 0), time(21, 0)],
+        )
+        self.assertTrue(
+            all(
+                (
+                    new_schedule.monday,
+                    new_schedule.tuesday,
+                    new_schedule.wednesday,
+                    new_schedule.thursday,
+                    new_schedule.friday,
+                    new_schedule.saturday,
+                    new_schedule.sunday,
+                )
+            )
+        )
+
+        history_response = self.client.get(
+            self.history_url(self.inactive_user_medicine_id)
+        )
+        history_html = history_response.data.decode("utf-8")
+        self.assertLess(
+            history_html.index(
+                f'data-schedule-id="{new_schedule.schedule_id}"'
+            ),
+            history_html.index(f'data-schedule-id="{source_id}"'),
+        )
+
+    def test_restart_closes_pending_or_expired_active_schedule(self):
+        self.log_in()
+
+        cases = (
+            {
+                "setup_pending": True,
+                "start_date_value": date(2099, 1, 1),
+                "tracking_started_at": utc_now(),
+            },
+            {
+                "setup_pending": False,
+                "start_date_value": date(2020, 1, 1),
+                "tracking_started_at": datetime(2020, 1, 1, tzinfo=UTC),
+            },
+        )
+
+        for case in cases:
+            with self.subTest(case=case):
+                db.session.query(MedicationTime).delete()
+                db.session.query(MedicationSchedule).delete()
+                self.user_medicine.schedule_setup_pending = True
+                db.session.commit()
+                old_schedule = self.add_schedule(
+                    course_days=1,
+                    medication_times=(time(8, 0),),
+                    active=True,
+                    **case,
+                )
+                response = self.post_restart(old_schedule)
+                self.assertEqual(response.status_code, 302)
+                db.session.expire_all()
+                stored_old = db.session.get(
+                    MedicationSchedule,
+                    old_schedule.schedule_id,
+                )
+                stored_user_medicine = db.session.get(
+                    UserMedicine,
+                    self.user_medicine_id,
+                )
+                self.assertFalse(stored_old.is_active)
+                self.assertFalse(
+                    stored_user_medicine.schedule_setup_pending
+                )
+                self.assertEqual(
+                    db.session.scalar(
+                        db.select(
+                            db.func.count(MedicationSchedule.schedule_id)
+                        ).where(MedicationSchedule.is_active.is_(True))
+                    ),
+                    1,
+                )
+
+    def test_restart_rejects_when_current_valid_schedule_exists(self):
+        current_schedule = self.add_schedule()
+        self.log_in()
+        token = self.get_csrf_token("/my-medicines")
+
+        get_response = self.client.get(
+            self.restart_url(current_schedule.schedule_id)
+        )
+        form_data = self.valid_form_data()
+        form_data["csrf_token"] = token
+        post_response = self.client.post(
+            self.restart_url(current_schedule.schedule_id),
+            data=form_data,
+        )
+
+        self.assertEqual(get_response.status_code, 302)
+        self.assertEqual(post_response.status_code, 302)
+        self.assertEqual(
+            db.session.query(MedicationSchedule).count(),
+            1,
+        )
+        db.session.refresh(current_schedule)
+        self.assertTrue(current_schedule.is_active)
+        message_response = self.client.get("/my-medicines")
+        self.assertIn(
+            "현재 진행 중인 복용 일정이 있습니다.".encode(),
+            message_response.data,
+        )
+
+    def test_restart_can_use_an_older_source_schedule(self):
+        older = self.add_schedule(
+            active=False,
+            dose_amount_text="0.5",
+            medication_times=(time(7, 0),),
+            created_at=datetime(2026, 10, 4, tzinfo=UTC),
+        )
+        expired_open = self.add_schedule(
+            active=True,
+            start_date_value=date(2020, 1, 1),
+            tracking_started_at=datetime(2020, 1, 1, tzinfo=UTC),
+            course_days=1,
+            medication_times=(time(8, 0),),
+            created_at=datetime(2026, 10, 5, tzinfo=UTC),
+        )
+        self.log_in()
+
+        response = self.post_restart(
+            older,
+            self.valid_form_data(dose_amount_text="0.5"),
+        )
+
+        self.assertEqual(response.status_code, 302)
+        db.session.expire_all()
+        self.assertFalse(
+            db.session.get(
+                MedicationSchedule,
+                expired_open.schedule_id,
+            ).is_active
+        )
+        newest = db.session.scalar(
+            db.select(MedicationSchedule)
+            .order_by(MedicationSchedule.schedule_id.desc())
+        )
+        self.assertNotEqual(newest.schedule_id, older.schedule_id)
+        self.assertEqual(newest.dose_amount_text, "0.5")
+
+    def test_restart_requires_remaining_occurrences_without_writing(self):
+        source = self.add_schedule(active=False)
+        self.log_in()
+        before_schedule_count = db.session.query(
+            MedicationSchedule
+        ).count()
+
+        response = self.post_restart(
+            source,
+            self.valid_form_data(
+                course_days="2",
+                reported_doses_taken_before_tracking="2",
+            ),
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(
+            "새 복용 과정에는 남은 예정 복용 횟수가 있어야 합니다.".encode(),
+            response.data,
+        )
+        self.assertEqual(
+            db.session.query(MedicationSchedule).count(),
+            before_schedule_count,
+        )
+        db.session.refresh(source)
+        db.session.refresh(self.user_medicine)
+        self.assertFalse(source.is_active)
+        self.assertTrue(self.user_medicine.is_active)
+        self.assertFalse(self.user_medicine.schedule_setup_pending)
+
+    def test_restart_database_errors_roll_back_all_changes(self):
+        source = self.add_schedule(
+            setup_pending=True,
+            medication_times=(time(8, 0), time(20, 0)),
+        )
+        source_id = source.schedule_id
+        old_time_rows = [
+            (value.medication_time_id, value.time_of_day)
+            for value in source.times
+        ]
+        self.log_in()
+        token = self.get_csrf_token(self.restart_url(source_id))
+
+        with patch.object(
+            db.session,
+            "commit",
+            side_effect=SQLAlchemyError("forced restart failure"),
+        ):
+            response = self.post_restart(source, token=token)
+
+        self.assertEqual(response.status_code, 302)
+        db.session.expire_all()
+        stored_source = db.session.get(MedicationSchedule, source_id)
+        stored_user_medicine = db.session.get(
+            UserMedicine,
+            self.user_medicine_id,
+        )
+        self.assertEqual(
+            db.session.query(MedicationSchedule).count(),
+            1,
+        )
+        self.assertTrue(stored_source.is_active)
+        self.assertEqual(
+            [
+                (value.medication_time_id, value.time_of_day)
+                for value in stored_source.times
+            ],
+            old_time_rows,
+        )
+        self.assertTrue(stored_user_medicine.is_active)
+        self.assertTrue(stored_user_medicine.schedule_setup_pending)
+
+    def test_restart_integrity_conflict_is_handled_and_rolled_back(self):
+        source = self.add_schedule(active=False)
+        self.log_in()
+        token = self.get_csrf_token(self.restart_url(source.schedule_id))
+        conflict = IntegrityError(
+            "forced restart conflict",
+            {},
+            Exception("unique conflict"),
+        )
+
+        with patch.object(db.session, "commit", side_effect=conflict):
+            response = self.post_restart(source, token=token)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            db.session.query(MedicationSchedule).count(),
+            1,
+        )
+        message_response = self.client.get("/my-medicines")
+        self.assertIn(
+            "복용 일정이 다른 요청에서 변경되었습니다. ".encode(),
+            message_response.data,
+        )
+        self.assertIn("최신 내용을 확인해주세요.".encode(), message_response.data)
+
+    def test_restart_links_follow_current_and_latest_schedule_rules(self):
+        current_schedule = self.add_schedule()
+        self.log_in()
+
+        current_history = self.client.get(self.history_url())
+        self.assertNotIn("다시 복용하기".encode(), current_history.data)
+
+        current_schedule.is_active = False
+        db.session.commit()
+        past_history = self.client.get(self.history_url())
+        self.assertIn(
+            self.restart_url(current_schedule.schedule_id).encode(),
+            past_history.data,
+        )
+
+        older = self.add_schedule(
+            user_medicine_id=self.inactive_user_medicine_id,
+            active=False,
+            created_at=datetime(2026, 10, 4, tzinfo=UTC),
+        )
+        latest = self.add_schedule(
+            user_medicine_id=self.inactive_user_medicine_id,
+            active=False,
+            created_at=datetime(2026, 10, 5, tzinfo=UTC),
+        )
+        list_response = self.client.get("/my-medicines")
+        html = list_response.data.decode("utf-8")
+        self.assertIn(self.restart_url(latest.schedule_id), html)
+        self.assertNotIn(self.restart_url(older.schedule_id), html)
 
     def test_edit_login_is_required_for_get_and_post(self):
         schedule = self.add_schedule()
@@ -1562,12 +2066,16 @@ class MedicationScheduleRouteTest(unittest.TestCase):
         )
         completed_response = self.client.get("/my-medicines")
         self.assertEqual(completed_response.status_code, 200)
-        self.assertIn("복용 완료".encode(), completed_response.data)
+        self.assertIn(
+            "과거에 복용했던 약".encode(),
+            completed_response.data,
+        )
         self.assertNotIn(
             "복용 설정 수정".encode(),
             completed_response.data,
         )
 
+        self.user_medicine.schedule_setup_pending = False
         self.user.timezone = "Invalid/Timezone"
         db.session.commit()
         error_response = self.client.get("/my-medicines")
@@ -1590,6 +2098,7 @@ class MedicationScheduleRouteTest(unittest.TestCase):
         self.add_schedule()
         response = self.client.get("/my-medicines")
         self.assertEqual(response.status_code, 200)
+        self.assertIn("복용 중".encode(), response.data)
         self.assertIn("복용 설정 수정".encode(), response.data)
 
     def test_my_medicines_pending_state_hides_old_active_schedule(self):
@@ -1601,6 +2110,420 @@ class MedicationScheduleRouteTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("복용 설정 필요".encode(), response.data)
         self.assertNotIn("복용 설정 수정".encode(), response.data)
+
+    def test_current_medicine_with_old_history_is_listed_only_once(self):
+        self.log_in()
+        medicine = Medicine(
+            item_seq="MED-CURRENT-HISTORY",
+            item_name="Current With History",
+        )
+        user_medicine = UserMedicine(
+            user=self.user,
+            medicine=medicine,
+            registration_source="search",
+            is_active=True,
+            schedule_setup_pending=False,
+        )
+        db.session.add_all([medicine, user_medicine])
+        db.session.commit()
+        self.add_schedule(
+            user_medicine_id=user_medicine.user_medicine_id,
+            active=False,
+        )
+        self.add_schedule(
+            user_medicine_id=user_medicine.user_medicine_id,
+            active=True,
+        )
+
+        response = self.client.get("/my-medicines")
+
+        self.assertEqual(response.status_code, 200)
+        marker = (
+            "data-user-medicine-id="
+            f'"{user_medicine.user_medicine_id}"'
+        )
+        self.assertEqual(response.data.decode("utf-8").count(marker), 1)
+        self.assertIn("Current With History".encode(), response.data)
+        self.assertIn("복용 이력".encode(), response.data)
+
+    def test_one_calculation_error_does_not_break_other_rows(self):
+        self.log_in()
+        valid_schedule = self.add_schedule(active=False)
+        invalid_schedule = self.add_schedule(active=True)
+        invalid_schedule.accounted_occurrence_count = 999
+        db.session.commit()
+
+        list_response = self.client.get("/my-medicines")
+        history_response = self.client.get(self.history_url())
+
+        self.assertEqual(list_response.status_code, 200)
+        self.assertIn(
+            "복용 설정 확인 필요".encode(),
+            list_response.data,
+        )
+        self.assertEqual(history_response.status_code, 200)
+        self.assertIn(
+            "복용 설정 확인 필요".encode(),
+            history_response.data,
+        )
+        self.assertIn("과거 복용 설정".encode(), history_response.data)
+        self.assertIn(
+            f'data-schedule-id="{valid_schedule.schedule_id}"'.encode(),
+            history_response.data,
+        )
+
+    def test_medication_history_requires_login_and_owner(self):
+        response = self.client.get(self.history_url())
+        self.assertEqual(response.status_code, 302)
+
+        self.log_in()
+        self.assertEqual(
+            self.client.get(
+                self.history_url(self.other_user_medicine_id)
+            ).status_code,
+            404,
+        )
+        self.assertEqual(
+            self.client.get(self.history_url(999999)).status_code,
+            404,
+        )
+
+        self.add_schedule(
+            user_medicine_id=self.inactive_user_medicine_id,
+            setup_pending=False,
+        )
+        response = self.client.get(
+            self.history_url(self.inactive_user_medicine_id)
+        )
+        self.assertEqual(response.status_code, 200)
+
+    def test_medication_history_lists_all_fields_in_newest_first_order(self):
+        self.log_in()
+        older = self.add_schedule(
+            start_date_value=date(2099, 1, 1),
+            tracking_started_at=datetime(2026, 10, 5, 5, 0, tzinfo=UTC),
+            course_days=3,
+            medication_times=(time(20, 0), time(8, 0)),
+            reported=1,
+            active=False,
+            dose_amount_text="0.5",
+            dose_unit_text="정",
+            intake_timing="before_meal",
+            created_at=datetime(2026, 10, 5, 0, 0, tzinfo=UTC),
+        )
+        newer = self.add_schedule(
+            start_date_value=date(2099, 2, 1),
+            course_days=2,
+            medication_times=(time(21, 0),),
+            active=True,
+            dose_amount_text="1.5",
+            dose_unit_text="캡슐",
+            intake_timing="regardless_of_meal",
+            created_at=datetime(2026, 10, 6, 0, 0, tzinfo=UTC),
+        )
+
+        response = self.client.get(self.history_url())
+
+        self.assertEqual(response.status_code, 200)
+        html = response.data.decode("utf-8")
+        self.assertLess(
+            html.index(f'data-schedule-id="{newer.schedule_id}"'),
+            html.index(f'data-schedule-id="{older.schedule_id}"'),
+        )
+        for expected in (
+            "2099-01-01",
+            "0.5",
+            "정",
+            "식전",
+            "2회",
+            "08:00",
+            "20:00",
+            "3일",
+            "1회",
+            "과거 복용 설정",
+            "식사와 관계없이",
+            "현재 복용 중",
+            "마지막 예정 복용 시각",
+        ):
+            self.assertIn(expected, html)
+        self.assertLess(html.index("08:00"), html.index("20:00"))
+
+    def test_medication_history_uses_truthful_schedule_statuses(self):
+        self.log_in()
+        current_schedule = self.add_schedule()
+        current_response = self.client.get(self.history_url())
+        self.assertIn("현재 복용 중".encode(), current_response.data)
+
+        current_schedule.is_active = False
+        completed_schedule = self.add_schedule(
+            start_date_value=date(2020, 1, 1),
+            tracking_started_at=datetime(2020, 1, 1, tzinfo=UTC),
+            course_days=1,
+            medication_times=(time(8, 0),),
+        )
+        db.session.commit()
+        completed_response = self.client.get(self.history_url())
+        self.assertIn(
+            "예정된 복용 계획 완료".encode(),
+            completed_response.data,
+        )
+        self.assertNotIn("실제 복용 완료".encode(), completed_response.data)
+
+        completed_schedule.is_active = False
+        db.session.commit()
+        removed_schedule = self.add_schedule(
+            user_medicine_id=self.inactive_user_medicine_id,
+            setup_pending=False,
+        )
+        removed_response = self.client.get(
+            self.history_url(self.inactive_user_medicine_id)
+        )
+        self.assertIn(
+            "내 복용약에서 제거되어 중단된 계획".encode(),
+            removed_response.data,
+        )
+
+        removed_schedule.is_active = False
+        db.session.commit()
+        past_response = self.client.get(
+            self.history_url(self.inactive_user_medicine_id)
+        )
+        self.assertIn("과거 복용 설정".encode(), past_response.data)
+
+    def test_medication_history_marks_pending_stale_plan_and_errors(self):
+        self.log_in()
+        self.add_schedule(setup_pending=True)
+
+        pending_response = self.client.get(self.history_url())
+        self.assertEqual(pending_response.status_code, 200)
+        self.assertIn(
+            "새 복용 설정 대기 중인 이전 계획".encode(),
+            pending_response.data,
+        )
+
+        self.user.timezone = "Invalid/Timezone"
+        db.session.commit()
+        error_response = self.client.get(self.history_url())
+        self.assertEqual(error_response.status_code, 200)
+        self.assertIn("복용 설정 확인 필요".encode(), error_response.data)
+        self.assertIn("확인할 수 없음".encode(), error_response.data)
+
+    def test_medication_history_last_occurrence_is_exact_or_unknown(self):
+        self.log_in()
+        schedule = self.add_schedule(
+            start_date_value=date(2026, 10, 5),
+            tracking_started_at=datetime(2026, 10, 5, 5, 0, tzinfo=UTC),
+            course_days=3,
+            medication_times=(time(8, 0), time(14, 0), time(20, 0)),
+        )
+
+        response = self.client.get(self.history_url())
+        self.assertIn("2026-10-08 08:00".encode(), response.data)
+
+        schedule.reported_doses_taken_before_tracking = 5
+        schedule.accounted_occurrence_count = 4
+        db.session.commit()
+        unknown_response = self.client.get(self.history_url())
+        self.assertIn("확인할 수 없음".encode(), unknown_response.data)
+
+    def test_my_medicines_separates_current_past_and_hides_no_history(self):
+        self.log_in()
+        self.add_schedule(setup_pending=True)
+
+        past_medicine = Medicine(
+            item_seq="MED-PAST",
+            item_name="Past Medicine",
+        )
+        past_user_medicine = UserMedicine(
+            user=self.user,
+            medicine=past_medicine,
+            registration_source="search",
+            is_active=True,
+            schedule_setup_pending=False,
+        )
+        db.session.add_all([past_medicine, past_user_medicine])
+        db.session.commit()
+        self.add_schedule(
+            user_medicine_id=past_user_medicine.user_medicine_id,
+            start_date_value=date(2020, 1, 1),
+            tracking_started_at=datetime(2020, 1, 1, tzinfo=UTC),
+            course_days=1,
+            medication_times=(time(8, 0),),
+        )
+
+        response = self.client.get("/my-medicines")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.data.decode("utf-8")
+        pending_marker = (
+            f'data-user-medicine-id="{self.user_medicine_id}"'
+        )
+        inactive_without_history_marker = (
+            "data-user-medicine-id="
+            f'"{self.inactive_user_medicine_id}"'
+        )
+        self.assertEqual(html.count(pending_marker), 1)
+        self.assertIn("복용 설정 필요", html)
+        self.assertIn("과거에 복용했던 약", html)
+        self.assertIn("Past Medicine", html)
+        self.assertNotIn(inactive_without_history_marker, html)
+
+    def test_past_medicines_are_sorted_by_latest_schedule(self):
+        self.log_in()
+        entries = []
+
+        for index, created_at in enumerate(
+            (
+                datetime(2026, 10, 4, tzinfo=UTC),
+                datetime(2026, 10, 6, tzinfo=UTC),
+                datetime(2026, 10, 6, tzinfo=UTC),
+            ),
+            start=1,
+        ):
+            medicine = Medicine(
+                item_seq=f"MED-SORT-{index}",
+                item_name=f"Sorted Medicine {index}",
+            )
+            user_medicine = UserMedicine(
+                user=self.user,
+                medicine=medicine,
+                registration_source="search",
+                is_active=False,
+                schedule_setup_pending=False,
+            )
+            db.session.add_all([medicine, user_medicine])
+            db.session.commit()
+            self.add_schedule(
+                user_medicine_id=user_medicine.user_medicine_id,
+                active=False,
+                created_at=created_at,
+            )
+            entries.append(user_medicine)
+
+        response = self.client.get("/my-medicines")
+        html = response.data.decode("utf-8")
+        self.assertLess(
+            html.index("Sorted Medicine 3"),
+            html.index("Sorted Medicine 2"),
+        )
+        self.assertLess(
+            html.index("Sorted Medicine 2"),
+            html.index("Sorted Medicine 1"),
+        )
+
+    def test_my_medicines_and_history_get_requests_do_not_write(self):
+        self.log_in()
+        schedule = self.add_schedule(
+            start_date_value=date(2020, 1, 1),
+            tracking_started_at=datetime(2020, 1, 1, tzinfo=UTC),
+            course_days=1,
+            medication_times=(time(8, 0),),
+        )
+        before_user_medicine = (
+            self.user_medicine.is_active,
+            self.user_medicine.schedule_setup_pending,
+        )
+        before_schedule = (
+            schedule.is_active,
+            schedule.accounted_occurrence_count,
+            schedule.reminder_tracking_started_at,
+            schedule.updated_at,
+        )
+        before_time_rows = [
+            (value.medication_time_id, value.time_of_day)
+            for value in schedule.times
+        ]
+
+        self.assertEqual(self.client.get("/my-medicines").status_code, 200)
+        self.assertEqual(
+            self.client.get(self.history_url()).status_code,
+            200,
+        )
+
+        db.session.expire_all()
+        stored_user_medicine = db.session.get(
+            UserMedicine,
+            self.user_medicine_id,
+        )
+        stored_schedule = db.session.get(
+            MedicationSchedule,
+            schedule.schedule_id,
+        )
+        self.assertEqual(
+            (
+                stored_user_medicine.is_active,
+                stored_user_medicine.schedule_setup_pending,
+            ),
+            before_user_medicine,
+        )
+        self.assertEqual(
+            (
+                stored_schedule.is_active,
+                stored_schedule.accounted_occurrence_count,
+                stored_schedule.reminder_tracking_started_at,
+                stored_schedule.updated_at,
+            ),
+            before_schedule,
+        )
+        self.assertEqual(
+            [
+                (value.medication_time_id, value.time_of_day)
+                for value in stored_schedule.times
+            ],
+            before_time_rows,
+        )
+
+    def test_my_medicines_query_count_does_not_grow_with_rows(self):
+        self.log_in()
+
+        for index in range(8):
+            medicine = Medicine(
+                item_seq=f"MED-NQ-{index}",
+                item_name=f"Query Medicine {index}",
+            )
+            user_medicine = UserMedicine(
+                user=self.user,
+                medicine=medicine,
+                registration_source="search",
+                is_active=False,
+                schedule_setup_pending=False,
+            )
+            db.session.add_all([medicine, user_medicine])
+            db.session.commit()
+            self.add_schedule(
+                user_medicine_id=user_medicine.user_medicine_id,
+                active=False,
+            )
+
+        select_statements = []
+
+        def record_select(
+            connection,
+            cursor,
+            statement,
+            parameters,
+            context,
+            executemany,
+        ):
+            if statement.lstrip().upper().startswith("SELECT"):
+                select_statements.append(statement)
+
+        event.listen(
+            self.test_engine,
+            "before_cursor_execute",
+            record_select,
+        )
+        try:
+            response = self.client.get("/my-medicines")
+        finally:
+            event.remove(
+                self.test_engine,
+                "before_cursor_execute",
+                record_select,
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertLessEqual(len(select_statements), 5)
 
     def test_register_new_user_medicine_sets_pending_true(self):
         self.log_in()

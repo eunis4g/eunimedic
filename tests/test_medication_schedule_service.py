@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 from services.medication_schedule_service import (  # noqa: E402
     MedicationScheduleCalculationError,
     calculate_daily_frequency,
+    calculate_last_scheduled_occurrence,
     calculate_occurrence_summary,
     calculate_planned_total,
     count_elapsed_occurrences,
@@ -265,6 +266,51 @@ class MedicationScheduleServiceTest(unittest.TestCase):
 
         self.assertEqual(len(occurrences), 9)
         self.assertNotIn(local_datetime(2026, 10, 8, 14), occurrences)
+
+    def test_last_scheduled_occurrence_uses_occurrence_rules(self):
+        tracking = local_datetime(2026, 10, 5, 14)
+
+        result = calculate_last_scheduled_occurrence(
+            start_date=date(2026, 10, 5),
+            course_days=3,
+            times=[time(8), time(14), time(20)],
+            reported_doses_taken_before_tracking=0,
+            accounted_occurrence_count=0,
+            reminder_tracking_started_at=tracking.astimezone(UTC),
+            timezone_name="Asia/Seoul",
+        )
+
+        self.assertEqual(result, local_datetime(2026, 10, 8, 8))
+
+    def test_last_scheduled_occurrence_respects_accounted_count(self):
+        edit_time = local_datetime(2026, 10, 6, 15)
+
+        result = calculate_last_scheduled_occurrence(
+            start_date=date(2026, 10, 5),
+            course_days=3,
+            times=[time(9), time(15), time(21)],
+            reported_doses_taken_before_tracking=0,
+            accounted_occurrence_count=4,
+            reminder_tracking_started_at=edit_time.astimezone(UTC),
+            timezone_name="Asia/Seoul",
+        )
+
+        self.assertEqual(result, local_datetime(2026, 10, 7, 21))
+
+    def test_last_scheduled_occurrence_is_unknown_without_latest_slots(self):
+        tracking = local_datetime(2026, 10, 5, 14)
+
+        result = calculate_last_scheduled_occurrence(
+            start_date=date(2026, 10, 5),
+            course_days=3,
+            times=[time(8), time(14), time(20)],
+            reported_doses_taken_before_tracking=5,
+            accounted_occurrence_count=4,
+            reminder_tracking_started_at=tracking.astimezone(UTC),
+            timezone_name="Asia/Seoul",
+        )
+
+        self.assertIsNone(result)
 
     def test_elapsed_before_middle_edit_is_four(self):
         elapsed = count_elapsed_occurrences(

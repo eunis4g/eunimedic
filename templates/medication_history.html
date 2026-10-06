@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+    <meta charset="UTF-8">
+    <title>{{ user_medicine.medicine.item_name }} 복용 이력</title>
+</head>
+
+<body>
+
+    <h1>{{ user_medicine.medicine.item_name }} 복용 이력</h1>
+    <p>
+        제조사:
+        {{ user_medicine.medicine.entp_name or '제조사 정보 없음' }}
+    </p>
+
+    {% if schedule_entries %}
+        {% for entry in schedule_entries %}
+            {% set schedule = entry.schedule %}
+            <article data-schedule-id="{{ schedule.schedule_id }}">
+                <h2>복용 설정 #{{ schedule.schedule_id }}</h2>
+                <p>상태: {{ entry.status_label }}</p>
+                <dl>
+                    <dt>복용 시작일</dt>
+                    <dd>{{ schedule.start_date.isoformat() }}</dd>
+
+                    <dt>1회 복용량</dt>
+                    <dd>
+                        {{ schedule.dose_amount_text }}
+                        {{ schedule.dose_unit_text }}
+                    </dd>
+
+                    <dt>복용 시점</dt>
+                    <dd>{{ entry.intake_timing_label }}</dd>
+
+                    <dt>하루 복용 횟수</dt>
+                    <dd>{{ entry.daily_frequency }}회</dd>
+
+                    <dt>복용 시간</dt>
+                    <dd>
+                        {% for medication_time in entry.medication_times %}
+                            <time>{{ medication_time.strftime('%H:%M') }}</time>{% if not loop.last %}, {% endif %}
+                        {% endfor %}
+                    </dd>
+
+                    <dt>복용 일수</dt>
+                    <dd>{{ schedule.course_days }}일</dd>
+
+                    <dt>관리 시작 전 복용했다고 입력한 횟수</dt>
+                    <dd>
+                        {{ schedule.reported_doses_taken_before_tracking }}회
+                    </dd>
+
+                    <dt>마지막 예정 복용 시각</dt>
+                    <dd>
+                        {% if entry.last_scheduled_occurrence is not none %}
+                            {{ entry.last_scheduled_occurrence.strftime(
+                                '%Y-%m-%d %H:%M'
+                            ) }}
+                        {% else %}
+                            확인할 수 없음
+                        {% endif %}
+                    </dd>
+                </dl>
+                {% if entry.can_restart %}
+                    <p>
+                        <a href="{{ url_for(
+                            'restart_medication_schedule',
+                            schedule_id=schedule.schedule_id
+                        ) }}">
+                            다시 복용하기
+                        </a>
+                    </p>
+                {% endif %}
+            </article>
+        {% endfor %}
+    {% else %}
+        <p>복용 설정 이력이 없습니다.</p>
+    {% endif %}
+
+    <p><a href="{{ url_for('my_medicines') }}">내 복용약으로 돌아가기</a></p>
+
+</body>
+
+</html>

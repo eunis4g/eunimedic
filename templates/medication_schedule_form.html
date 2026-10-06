@@ -11,6 +11,13 @@
     <h1>{{ heading }}</h1>
     <p>{{ user_medicine.medicine.item_name }}</p>
 
+    {% if mode == 'restart' %}
+        <p>
+            이전 복용 설정을 참고해 새 복용 과정을 시작합니다.
+            복용량, 복용 일수, 이미 복용한 횟수를 다시 확인해주세요.
+        </p>
+    {% endif %}
+
     {% with messages = get_flashed_messages(with_categories=true) %}
         {% if messages %}
             <section aria-label="알림 메시지">

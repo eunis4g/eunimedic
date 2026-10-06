@@ -29,6 +29,7 @@ from markupsafe import Markup
 from requests import RequestException
 from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from sqlalchemy.orm import selectinload
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
 
@@ -57,6 +58,7 @@ from models import (
 from services.email_service import EmailServiceError, send_verification_email
 from services.medication_schedule_service import (
     MedicationScheduleCalculationError,
+    calculate_last_scheduled_occurrence,
     calculate_occurrence_summary,
     normalize_medication_times,
     validate_plan_capacity,
@@ -131,6 +133,11 @@ MEDICATION_INTAKE_TIMINGS = {
     "before_meal",
     "after_meal",
     "regardless_of_meal",
+}
+MEDICATION_INTAKE_TIMING_LABELS = {
+    "before_meal": "식전",
+    "after_meal": "식후",
+    "regardless_of_meal": "식사와 관계없이",
 }
 MEDICATION_DOSE_UNITS = {"정", "캡슐", "포"}
 MEDICATION_DOSE_AMOUNT_PATTERN = re.compile(
@@ -262,6 +269,29 @@ def get_active_medication_schedule(user_medicine_id):
     )
 
 
+def get_owned_medication_schedule(schedule_id):
+
+    schedule = db.session.scalar(
+        db.select(MedicationSchedule)
+        .options(
+            selectinload(MedicationSchedule.times),
+            selectinload(
+                MedicationSchedule.user_medicine
+            ).selectinload(UserMedicine.medicine),
+        )
+        .join(MedicationSchedule.user_medicine)
+        .where(
+            MedicationSchedule.schedule_id == schedule_id,
+            UserMedicine.user_id == current_user.user_id,
+        )
+    )
+
+    if schedule is None:
+        abort(404)
+
+    return schedule
+
+
 def get_owned_editable_medication_schedule(schedule_id):
 
     schedule = db.session.scalar(
@@ -339,6 +369,107 @@ def calculate_stored_schedule_summary(
         reference_at=reference_at,
         timezone_name=timezone_name,
     )
+
+
+def calculate_stored_schedule_last_occurrence(
+    schedule,
+    *,
+    timezone_name,
+):
+
+    return calculate_last_scheduled_occurrence(
+        start_date=schedule.start_date,
+        course_days=schedule.course_days,
+        times=(
+            medication_time.time_of_day
+            for medication_time in schedule.times
+        ),
+        reported_doses_taken_before_tracking=(
+            schedule.reported_doses_taken_before_tracking
+        ),
+        accounted_occurrence_count=(
+            schedule.accounted_occurrence_count
+        ),
+        reminder_tracking_started_at=as_utc(
+            schedule.reminder_tracking_started_at
+        ),
+        timezone_name=timezone_name,
+    )
+
+
+def get_schedule_history_status(user_medicine, schedule, summary):
+
+    if summary.remaining == 0:
+        return "planned_completed", "예정된 복용 계획 완료"
+
+    if schedule.is_active:
+        if not user_medicine.is_active:
+            return "removed_interrupted", "내 복용약에서 제거되어 중단된 계획"
+
+        if user_medicine.schedule_setup_pending:
+            return "pending_replacement", "새 복용 설정 대기 중인 이전 계획"
+
+        return "current", "현재 복용 중"
+
+    return "past", "과거 복용 설정"
+
+
+def build_schedule_history_entry(
+    user_medicine,
+    schedule,
+    *,
+    reference_at,
+    timezone_name,
+):
+
+    medication_times = tuple(
+        sorted(
+            medication_time.time_of_day
+            for medication_time in schedule.times
+        )
+    )
+
+    try:
+        summary = calculate_stored_schedule_summary(
+            schedule,
+            reference_at=reference_at,
+            timezone_name=timezone_name,
+        )
+    except MedicationScheduleCalculationError:
+        status = "error"
+        status_label = "복용 설정 확인 필요"
+        last_scheduled_occurrence = None
+    else:
+        status, status_label = get_schedule_history_status(
+            user_medicine,
+            schedule,
+            summary,
+        )
+
+        try:
+            last_scheduled_occurrence = (
+                calculate_stored_schedule_last_occurrence(
+                    schedule,
+                    timezone_name=timezone_name,
+                )
+            )
+        except MedicationScheduleCalculationError:
+            last_scheduled_occurrence = None
+
+    return {
+        "schedule": schedule,
+        "status": status,
+        "status_label": status_label,
+        "intake_timing_label": (
+            MEDICATION_INTAKE_TIMING_LABELS.get(
+                schedule.intake_timing,
+                "복용 시점 확인 필요",
+            )
+        ),
+        "daily_frequency": len(medication_times),
+        "medication_times": medication_times,
+        "last_scheduled_occurrence": last_scheduled_occurrence,
+    }
 
 
 def get_medication_schedule_form_data():
@@ -1052,80 +1183,170 @@ def logout():
 @app.route("/my-medicines", methods=["GET"])
 @login_required
 def my_medicines():
-
+    view_time = utc_now()
     user_medicines = db.session.scalars(
         db.select(UserMedicine)
-        .where(
-            UserMedicine.user_id == current_user.user_id,
-            UserMedicine.is_active.is_(True),
-        )
-        .order_by(UserMedicine.registered_at.desc())
-    ).all()
-    schedule_states = {
-        user_medicine.user_medicine_id: {
-            "status": (
-                "pending"
-                if user_medicine.schedule_setup_pending
-                else "none"
+        .options(
+            selectinload(UserMedicine.medicine),
+            selectinload(UserMedicine.schedules).selectinload(
+                MedicationSchedule.times
             ),
-            "schedule_id": None,
-        }
-        for user_medicine in user_medicines
-    }
-    user_medicines_by_id = {
-        user_medicine.user_medicine_id: user_medicine
-        for user_medicine in user_medicines
-    }
-    user_medicine_ids = list(schedule_states)
+        )
+        .where(UserMedicine.user_id == current_user.user_id)
+        .order_by(
+            UserMedicine.registered_at.desc(),
+            UserMedicine.user_medicine_id.desc(),
+        )
+    ).all()
+    current_medications = []
+    past_medications = []
 
-    if user_medicine_ids:
-        active_schedules = db.session.scalars(
-            db.select(MedicationSchedule).where(
-                MedicationSchedule.user_medicine_id.in_(
-                    user_medicine_ids
-                ),
-                MedicationSchedule.is_active.is_(True),
-            )
-        ).all()
-        reference_at = utc_now()
+    for user_medicine in user_medicines:
+        schedules = tuple(user_medicine.schedules)
+        active_schedule = next(
+            (schedule for schedule in schedules if schedule.is_active),
+            None,
+        )
+        has_history = bool(schedules)
 
-        for schedule in active_schedules:
-            user_medicine = user_medicines_by_id[
-                schedule.user_medicine_id
-            ]
-
+        if user_medicine.is_active:
             if user_medicine.schedule_setup_pending:
+                current_medications.append(
+                    {
+                        "user_medicine": user_medicine,
+                        "status": "pending",
+                        "schedule_id": None,
+                        "has_history": has_history,
+                    }
+                )
                 continue
 
-            try:
-                summary = calculate_stored_schedule_summary(
-                    schedule,
-                    reference_at=reference_at,
-                    timezone_name=current_user.timezone,
+            if active_schedule is not None:
+                try:
+                    summary = calculate_stored_schedule_summary(
+                        active_schedule,
+                        reference_at=view_time,
+                        timezone_name=current_user.timezone,
+                    )
+                except MedicationScheduleCalculationError:
+                    current_medications.append(
+                        {
+                            "user_medicine": user_medicine,
+                            "status": "error",
+                            "schedule_id": active_schedule.schedule_id,
+                            "has_history": has_history,
+                        }
+                    )
+                    continue
+
+                if summary.remaining > 0:
+                    current_medications.append(
+                        {
+                            "user_medicine": user_medicine,
+                            "status": "active",
+                            "schedule_id": active_schedule.schedule_id,
+                            "has_history": has_history,
+                        }
+                    )
+                    continue
+
+            if not schedules:
+                current_medications.append(
+                    {
+                        "user_medicine": user_medicine,
+                        "status": "pending",
+                        "schedule_id": None,
+                        "has_history": False,
+                    }
                 )
-            except MedicationScheduleCalculationError:
-                schedule_states[
-                    schedule.user_medicine_id
-                ] = {
-                    "status": "error",
-                    "schedule_id": schedule.schedule_id,
+                continue
+
+        if schedules:
+            latest_schedule = max(
+                schedules,
+                key=lambda schedule: (
+                    as_utc(schedule.created_at),
+                    schedule.schedule_id,
+                ),
+            )
+            past_medications.append(
+                {
+                    "user_medicine": user_medicine,
+                    "latest_schedule": latest_schedule,
                 }
-            else:
-                schedule_states[
-                    schedule.user_medicine_id
-                ] = {
-                    "status": (
-                        "completed"
-                        if summary.remaining == 0
-                        else "active"
-                    ),
-                    "schedule_id": schedule.schedule_id,
-                }
+            )
+
+    past_medications.sort(
+        key=lambda item: (
+            as_utc(item["latest_schedule"].created_at),
+            item["user_medicine"].user_medicine_id,
+        ),
+        reverse=True,
+    )
 
     return render_template(
         "my_medicines.html",
-        user_medicines=user_medicines,
-        schedule_states=schedule_states,
+        current_medications=current_medications,
+        past_medications=past_medications,
+    )
+
+
+@app.route(
+    "/my-medicines/<int:user_medicine_id>/history",
+    methods=["GET"],
+)
+@login_required
+def medication_history(user_medicine_id):
+    view_time = utc_now()
+    user_medicine = db.session.scalar(
+        db.select(UserMedicine)
+        .options(
+            selectinload(UserMedicine.medicine),
+            selectinload(UserMedicine.schedules).selectinload(
+                MedicationSchedule.times
+            ),
+        )
+        .where(
+            UserMedicine.user_medicine_id == user_medicine_id,
+            UserMedicine.user_id == current_user.user_id,
+        )
+    )
+
+    if user_medicine is None:
+        abort(404)
+
+    schedules = sorted(
+        user_medicine.schedules,
+        key=lambda schedule: (
+            as_utc(schedule.created_at),
+            schedule.schedule_id,
+        ),
+        reverse=True,
+    )
+    schedule_entries = [
+        build_schedule_history_entry(
+            user_medicine,
+            schedule,
+            reference_at=view_time,
+            timezone_name=current_user.timezone,
+        )
+        for schedule in schedules
+    ]
+    has_current_schedule = any(
+        entry["status"] == "current"
+        for entry in schedule_entries
+    )
+
+    for entry in schedule_entries:
+        entry["can_restart"] = (
+            not has_current_schedule
+            and entry["status"] != "current"
+        )
+
+    return render_template(
+        "medication_history.html",
+        user_medicine=user_medicine,
+        schedule_entries=schedule_entries,
     )
 
 
@@ -1304,6 +1525,199 @@ def new_medication_schedule(user_medicine_id):
     else:
         flash("복용 설정이 저장되었습니다.", "success")
 
+    return redirect(url_for("my_medicines"))
+
+
+@app.route(
+    "/medication-schedules/<int:schedule_id>/restart",
+    methods=["GET", "POST"],
+)
+@login_required
+def restart_medication_schedule(schedule_id):
+
+    restart_time = utc_now()
+    source_schedule = get_owned_medication_schedule(schedule_id)
+    user_medicine = source_schedule.user_medicine
+    active_schedule = get_active_medication_schedule(
+        user_medicine.user_medicine_id
+    )
+
+    if (
+        user_medicine.is_active
+        and not user_medicine.schedule_setup_pending
+        and active_schedule is not None
+    ):
+        try:
+            active_summary = calculate_stored_schedule_summary(
+                active_schedule,
+                reference_at=restart_time,
+                timezone_name=current_user.timezone,
+            )
+        except MedicationScheduleCalculationError:
+            flash(
+                "복용 설정 상태를 확인할 수 없습니다. 다시 시도해주세요.",
+                "error",
+            )
+            return redirect(url_for("my_medicines"))
+
+        if active_summary.remaining > 0:
+            flash("현재 진행 중인 복용 일정이 있습니다.", "error")
+            return redirect(url_for("my_medicines"))
+
+    if request.method == "GET":
+        try:
+            user_timezone = ZoneInfo(current_user.timezone)
+        except (ZoneInfoNotFoundError, TypeError, ValueError):
+            flash(
+                "시간대 정보를 확인할 수 없습니다. 다시 시도해주세요.",
+                "error",
+            )
+            return redirect(url_for("my_medicines"))
+
+        source_times = normalize_medication_times(
+            medication_time.time_of_day
+            for medication_time in source_schedule.times
+        )
+        form_data = {
+            "dose_amount_text": source_schedule.dose_amount_text,
+            "dose_unit_text": source_schedule.dose_unit_text,
+            "intake_timing": source_schedule.intake_timing,
+            "daily_frequency": str(len(source_times)),
+            "medication_times": [
+                medication_time.strftime("%H:%M")
+                for medication_time in source_times
+            ],
+            "start_date": restart_time.astimezone(
+                user_timezone
+            ).date().isoformat(),
+            "course_days": "",
+            "reported_doses_taken_before_tracking": "0",
+        }
+
+        return render_template(
+            "medication_schedule_form.html",
+            user_medicine=user_medicine,
+            form_data=form_data,
+            errors=[],
+            mode="restart",
+            form_action=url_for(
+                "restart_medication_schedule",
+                schedule_id=schedule_id,
+            ),
+            heading="다시 복용하기",
+            submit_label="새 복용 일정 시작",
+            schedule_version=None,
+        )
+
+    form_data = get_medication_schedule_form_data()
+    validated_data, errors = validate_medication_schedule_form(
+        form_data,
+        accounted_occurrence_count=0,
+    )
+
+    if not errors:
+        try:
+            new_summary = calculate_occurrence_summary(
+                start_date=validated_data["start_date"],
+                course_days=validated_data["course_days"],
+                times=validated_data["medication_times"],
+                reported_doses_taken_before_tracking=(
+                    validated_data[
+                        "reported_doses_taken_before_tracking"
+                    ]
+                ),
+                accounted_occurrence_count=0,
+                reminder_tracking_started_at=restart_time,
+                reference_at=restart_time,
+                timezone_name=current_user.timezone,
+            )
+        except MedicationScheduleCalculationError:
+            errors.append(
+                "복용 설정을 계산할 수 없습니다. "
+                "입력값과 시간대를 확인해주세요."
+            )
+        else:
+            if new_summary.remaining == 0:
+                errors.append(
+                    "새 복용 과정에는 남은 예정 복용 횟수가 있어야 합니다."
+                )
+
+    if errors:
+        return (
+            render_template(
+                "medication_schedule_form.html",
+                user_medicine=user_medicine,
+                form_data=form_data,
+                errors=errors,
+                mode="restart",
+                form_action=url_for(
+                    "restart_medication_schedule",
+                    schedule_id=schedule_id,
+                ),
+                heading="다시 복용하기",
+                submit_label="새 복용 일정 시작",
+                schedule_version=None,
+            ),
+            400,
+        )
+
+    if active_schedule is not None:
+        active_schedule.is_active = False
+
+    try:
+        db.session.flush()
+
+        user_medicine.is_active = True
+        user_medicine.schedule_setup_pending = False
+        new_schedule = MedicationSchedule(
+            user_medicine_id=user_medicine.user_medicine_id,
+            intake_timing=validated_data["intake_timing"],
+            dose_amount_text=validated_data["dose_amount_text"],
+            dose_unit_text=validated_data["dose_unit_text"],
+            instructions=None,
+            start_date=validated_data["start_date"],
+            end_date=None,
+            course_days=validated_data["course_days"],
+            reported_doses_taken_before_tracking=(
+                validated_data[
+                    "reported_doses_taken_before_tracking"
+                ]
+            ),
+            reminder_tracking_started_at=restart_time,
+            accounted_occurrence_count=0,
+            monday=True,
+            tuesday=True,
+            wednesday=True,
+            thursday=True,
+            friday=True,
+            saturday=True,
+            sunday=True,
+            is_active=True,
+        )
+        new_schedule.times.extend(
+            MedicationTime(time_of_day=medication_time)
+            for medication_time in validated_data["medication_times"]
+        )
+        db.session.add(new_schedule)
+        db.session.flush()
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        flash(
+            "복용 일정이 다른 요청에서 변경되었습니다. "
+            "최신 내용을 확인해주세요.",
+            "error",
+        )
+        return redirect(url_for("my_medicines"))
+    except SQLAlchemyError:
+        db.session.rollback()
+        flash(
+            "새 복용 일정을 시작하지 못했습니다. 다시 시도해주세요.",
+            "error",
+        )
+        return redirect(url_for("my_medicines"))
+
+    flash("새 복용 일정이 시작되었습니다.", "success")
     return redirect(url_for("my_medicines"))
 
 

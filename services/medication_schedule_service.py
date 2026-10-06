@@ -337,6 +337,55 @@ def generate_future_occurrences(
     return tuple(occurrences)
 
 
+def calculate_last_scheduled_occurrence(
+    *,
+    start_date: date,
+    course_days: int,
+    times: Iterable[time],
+    reported_doses_taken_before_tracking: int,
+    accounted_occurrence_count: int,
+    reminder_tracking_started_at: datetime,
+    timezone_name: str,
+) -> datetime | None:
+    """Return the final app-managed slot in the latest tracking segment.
+
+    A schedule with no slots left in its latest segment cannot provide an
+    exact historical timestamp from the current aggregate fields alone.
+    """
+
+    normalized_times = normalize_medication_times(times)
+    planned_total = validate_plan_capacity(
+        times=normalized_times,
+        course_days=course_days,
+        reported_doses_taken_before_tracking=(
+            reported_doses_taken_before_tracking
+        ),
+        accounted_occurrence_count=accounted_occurrence_count,
+    )
+    slots_in_latest_segment = planned_total - (
+        reported_doses_taken_before_tracking
+        + accounted_occurrence_count
+    )
+
+    if slots_in_latest_segment == 0:
+        return None
+
+    occurrences = generate_future_occurrences(
+        start_date=start_date,
+        course_days=course_days,
+        times=normalized_times,
+        reported_doses_taken_before_tracking=(
+            reported_doses_taken_before_tracking
+        ),
+        accounted_occurrence_count=accounted_occurrence_count,
+        reminder_tracking_started_at=reminder_tracking_started_at,
+        reference_at=reminder_tracking_started_at,
+        timezone_name=timezone_name,
+    )
+
+    return occurrences[-1] if occurrences else None
+
+
 def _calculate_segment_start_utc(
     *,
     start_date: date,
