@@ -37,13 +37,23 @@
             <h2 id="medication-plan-times-heading">복용 시간</h2>
             <p>복용 시간은 일정에 약을 추가할 때 선택할 수 있습니다.</p>
 
-            {% if plan_times %}
+            {% if plan_time_entries %}
                 <ul>
-                    {% for plan_time in plan_times %}
+                    {% for entry in plan_time_entries %}
+                        {% set plan_time = entry.plan_time %}
                         <li data-plan-time-id="{{ plan_time.plan_time_id }}">
                             <time datetime="{{ plan_time.time_of_day.strftime('%H:%M') }}">
                                 {{ plan_time.time_of_day.strftime('%H:%M') }}
                             </time>
+                            {% if entry.schedules %}
+                                <ul>
+                                    {% for schedule in entry.schedules %}
+                                        <li data-schedule-id="{{ schedule.schedule_id }}">
+                                            {{ schedule.user_medicine.medicine.item_name }}
+                                        </li>
+                                    {% endfor %}
+                                </ul>
+                            {% endif %}
                             <form
                                 method="POST"
                                 action="{{ url_for(
@@ -101,6 +111,17 @@
                 >
                 <button type="submit">+ 복용 시간 추가</button>
             </form>
+
+            {% if plan_times %}
+                <p>
+                    <a href="{{ url_for(
+                        'select_medication_for_plan',
+                        plan_id=plan.plan_id
+                    ) }}">+ 복용약 추가</a>
+                </p>
+            {% else %}
+                <p>먼저 복용 시간을 하나 이상 추가해주세요.</p>
+            {% endif %}
         </section>
     {% endif %}
 

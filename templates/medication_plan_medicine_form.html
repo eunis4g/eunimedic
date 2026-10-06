@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+    <meta charset="UTF-8">
+    <title>{{ user_medicine.medicine.item_name }} 복용 설정</title>
+</head>
+
+<body>
+
+    <h1>{{ user_medicine.medicine.item_name }} 복용 설정</h1>
+    <p>복용 값과 시간을 직접 선택해주세요.</p>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            <section aria-label="알림 메시지">
+                {% for category, message in messages %}
+                    <p role="{{ 'alert' if category == 'error' else 'status' }}">
+                        {{ message }}
+                    </p>
+                {% endfor %}
+            </section>
+        {% endif %}
+    {% endwith %}
+
+    {% if errors %}
+        <section aria-label="입력 오류">
+            <h2>입력 내용을 확인해주세요.</h2>
+            <ul>
+                {% for error in errors %}
+                    <li>{{ error }}</li>
+                {% endfor %}
+            </ul>
+        </section>
+    {% endif %}
+
+    <form method="POST" action="{{ url_for(
+        'add_medication_to_plan',
+        plan_id=plan.plan_id,
+        user_medicine_id=user_medicine.user_medicine_id
+    ) }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="plan_version" value="{{ plan_version }}">
+
+        <fieldset>
+            <legend>복용량</legend>
+            <button id="decrease-dose-amount" type="button" aria-label="복용량 줄이기">-</button>
+            <input
+                id="dose_amount_text"
+                name="dose_amount_text"
+                type="number"
+                step="any"
+                value="{{ form_data.dose_amount_text }}"
+                required
+            >
+            <button id="increase-dose-amount" type="button" aria-label="복용량 늘리기">+</button>
+            <label for="dose_unit_text">단위</label>
+            <select id="dose_unit_text" name="dose_unit_text" required>
+                <option value="">선택</option>
+                {% for dose_unit in ['정', '캡슐', '포'] %}
+                    <option
+                        value="{{ dose_unit }}"
+                        {% if form_data.dose_unit_text == dose_unit %}selected{% endif %}
+                    >{{ dose_unit }}</option>
+                {% endfor %}
+            </select>
+            <p>소수점 단위로 복용하는 경우 직접 입력해주세요. (예: 0.5)</p>
+        </fieldset>
+
+        <p>
+            <label for="intake_timing">복용 시점</label>
+            <select id="intake_timing" name="intake_timing" required>
+                {% for value, label in [
+                    ('before_meal', '식전'),
+                    ('after_meal', '식후'),
+                    ('regardless_of_meal', '식사와 관계없음')
+                ] %}
+                    <option
+                        value="{{ value }}"
+                        {% if form_data.intake_timing == value %}selected{% endif %}
+                    >{{ label }}</option>
+                {% endfor %}
+            </select>
+        </p>
+
+        <p>
+            <label for="start_date">복용 시작일</label>
+            <input
+                id="start_date"
+                name="start_date"
+                type="date"
+                value="{{ form_data.start_date }}"
+                required
+            >
+        </p>
+
+        <p>
+            <label for="course_days">복용 일수</label>
+            <input
+                id="course_days"
+                name="course_days"
+                type="number"
+                min="1"
+                step="1"
+                value="{{ form_data.course_days }}"
+                required
+            >
+        </p>
+
+        <p>
+            <label for="reported_doses_taken_before_tracking">
+                처음 알림 추적 시작 전 이미 복용한 횟수
+            </label>
+            <input
+                id="reported_doses_taken_before_tracking"
+                name="reported_doses_taken_before_tracking"
+                type="number"
+                min="0"
+                step="1"
+                value="{{ form_data.reported_doses_taken_before_tracking }}"
+                required
+            >
+        </p>
+
+        <fieldset>
+            <legend>복용 시간</legend>
+            {% for plan_time in plan_times %}
+                <label>
+                    <input
+                        type="checkbox"
+                        name="selected_plan_time_ids"
+                        value="{{ plan_time.plan_time_id }}"
+                        {% if plan_time.plan_time_id|string in form_data.selected_plan_time_ids %}checked{% endif %}
+                    >
+                    {{ plan_time.time_of_day.strftime('%H:%M') }}
+                </label>
+            {% endfor %}
+        </fieldset>
+
+        <button type="submit">일정에 추가</button>
+    </form>
+
+    <p>
+        <a href="{{ url_for(
+            'select_medication_for_plan',
+            plan_id=plan.plan_id
+        ) }}">복용약 선택으로 돌아가기</a>
+    </p>
+
+    <script>
+        (() => {
+            const input = document.getElementById("dose_amount_text");
+
+            function adjustDoseAmount(change) {
+                const value = Number(input.value);
+
+                if (!Number.isFinite(value)) {
+                    return;
+                }
+
+                const nextValue = value + change;
+
+                if (nextValue > 0) {
+                    input.value = String(nextValue);
+                }
+            }
+
+            document.getElementById("decrease-dose-amount").addEventListener(
+                "click",
+                () => adjustDoseAmount(-1)
+            );
+            document.getElementById("increase-dose-amount").addEventListener(
+                "click",
+                () => adjustDoseAmount(1)
+            );
+        })();
+    </script>
+
+</body>
+
+</html>

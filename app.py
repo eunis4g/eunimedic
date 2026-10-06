@@ -298,6 +298,51 @@ def get_owned_active_medication_plan(plan_id):
     return plan
 
 
+def get_medication_plan_times(plan_id):
+
+    return db.session.scalars(
+        db.select(MedicationPlanTime)
+        .where(MedicationPlanTime.plan_id == plan_id)
+        .order_by(MedicationPlanTime.time_of_day.asc())
+    ).all()
+
+
+def validate_selected_plan_times(plan_id, submitted_ids):
+
+    errors = []
+
+    if not submitted_ids:
+        return [], ["복용 시간을 하나 이상 선택해주세요."]
+
+    parsed_ids = []
+
+    for submitted_id in submitted_ids:
+        normalized_id = submitted_id.strip()
+
+        if not normalized_id.isdigit() or int(normalized_id) < 1:
+            errors.append("선택한 복용 시간을 확인해주세요.")
+            return [], errors
+
+        parsed_ids.append(int(normalized_id))
+
+    if len(parsed_ids) != len(set(parsed_ids)):
+        return [], ["같은 복용 시간을 중복해서 선택할 수 없습니다."]
+
+    plan_times = db.session.scalars(
+        db.select(MedicationPlanTime)
+        .where(
+            MedicationPlanTime.plan_id == plan_id,
+            MedicationPlanTime.plan_time_id.in_(parsed_ids),
+        )
+        .order_by(MedicationPlanTime.time_of_day.asc())
+    ).all()
+
+    if len(plan_times) != len(parsed_ids):
+        return [], ["선택한 복용 시간을 확인해주세요."]
+
+    return plan_times, []
+
+
 def get_owned_medication_schedule(schedule_id):
 
     schedule = db.session.scalar(
@@ -427,6 +472,42 @@ def calculate_stored_schedule_summary(
     )
 
 
+def get_plan_schedule_addition_status(
+    user_medicine,
+    active_schedule,
+    *,
+    plan_id,
+    reference_at,
+    timezone_name,
+):
+
+    if active_schedule is None:
+        return "available"
+
+    if active_schedule.plan_id == plan_id:
+        return "already_added"
+
+    if (
+        active_schedule.plan_id is None
+        and user_medicine.schedule_setup_pending
+    ):
+        return "available"
+
+    try:
+        summary = calculate_stored_schedule_summary(
+            active_schedule,
+            reference_at=reference_at,
+            timezone_name=timezone_name,
+        )
+    except MedicationScheduleCalculationError:
+        return "in_progress"
+
+    if summary.remaining > 0:
+        return "in_progress"
+
+    return "available"
+
+
 def calculate_stored_schedule_last_occurrence(
     schedule,
     *,
@@ -545,6 +626,24 @@ def get_medication_schedule_form_data():
     }
 
 
+def get_medication_plan_schedule_form_data():
+
+    return {
+        "dose_amount_text": request.form.get("dose_amount_text", ""),
+        "dose_unit_text": request.form.get("dose_unit_text", ""),
+        "intake_timing": request.form.get("intake_timing", ""),
+        "start_date": request.form.get("start_date", ""),
+        "course_days": request.form.get("course_days", ""),
+        "reported_doses_taken_before_tracking": request.form.get(
+            "reported_doses_taken_before_tracking",
+            "",
+        ),
+        "selected_plan_time_ids": request.form.getlist(
+            "selected_plan_time_ids"
+        ),
+    }
+
+
 def parse_schedule_integer(value, *, field_label, minimum, errors):
 
     normalized_value = value.strip()
@@ -578,11 +677,7 @@ def parse_medication_time(value):
     return time.fromisoformat(normalized_time)
 
 
-def validate_medication_schedule_form(
-    form_data,
-    *,
-    accounted_occurrence_count=0,
-):
+def validate_medication_schedule_details(form_data):
 
     errors = []
     validated_data = {}
@@ -623,6 +718,47 @@ def validate_medication_schedule_form(
     else:
         validated_data["intake_timing"] = intake_timing
 
+    try:
+        validated_data["start_date"] = date.fromisoformat(
+            form_data["start_date"].strip()
+        )
+    except ValueError:
+        errors.append("복용 시작일을 올바르게 입력해주세요.")
+
+    course_days = parse_schedule_integer(
+        form_data["course_days"],
+        field_label="복용 일수",
+        minimum=1,
+        errors=errors,
+    )
+    reported_doses = parse_schedule_integer(
+        form_data["reported_doses_taken_before_tracking"],
+        field_label="알림 설정 전에 이미 복용한 횟수",
+        minimum=0,
+        errors=errors,
+    )
+
+    if course_days is not None:
+        validated_data["course_days"] = course_days
+
+    if reported_doses is not None:
+        validated_data["reported_doses_taken_before_tracking"] = (
+            reported_doses
+        )
+
+    return validated_data, errors
+
+
+def validate_medication_schedule_form(
+    form_data,
+    *,
+    accounted_occurrence_count=0,
+):
+
+    validated_data, errors = validate_medication_schedule_details(
+        form_data
+    )
+
     daily_frequency = parse_schedule_integer(
         form_data["daily_frequency"],
         field_label="하루 복용 횟수",
@@ -662,33 +798,10 @@ def validate_medication_schedule_form(
         except MedicationScheduleCalculationError:
             errors.append("중복되지 않은 복용 시간을 입력해주세요.")
 
-    try:
-        validated_data["start_date"] = date.fromisoformat(
-            form_data["start_date"].strip()
-        )
-    except ValueError:
-        errors.append("복용 시작일을 올바르게 입력해주세요.")
-
-    course_days = parse_schedule_integer(
-        form_data["course_days"],
-        field_label="복용 일수",
-        minimum=1,
-        errors=errors,
+    course_days = validated_data.get("course_days")
+    reported_doses = validated_data.get(
+        "reported_doses_taken_before_tracking"
     )
-    reported_doses = parse_schedule_integer(
-        form_data["reported_doses_taken_before_tracking"],
-        field_label="알림 설정 전에 이미 복용한 횟수",
-        minimum=0,
-        errors=errors,
-    )
-
-    if course_days is not None:
-        validated_data["course_days"] = course_days
-
-    if reported_doses is not None:
-        validated_data["reported_doses_taken_before_tracking"] = (
-            reported_doses
-        )
 
     if (
         "medication_times" in validated_data
@@ -1252,11 +1365,18 @@ def my_medication_plan():
 
     plan = get_current_active_medication_plan()
     plan_times = []
+    plan_time_entries = []
     plan_version = None
 
     if plan is not None:
         plan_times = db.session.scalars(
             db.select(MedicationPlanTime)
+            .options(
+                selectinload(MedicationPlanTime.schedule_links)
+                .selectinload(MedicationSchedulePlanTime.schedule)
+                .selectinload(MedicationSchedule.user_medicine)
+                .selectinload(UserMedicine.medicine)
+            )
             .where(MedicationPlanTime.plan_id == plan.plan_id)
             .order_by(MedicationPlanTime.time_of_day.asc())
         ).all()
@@ -1264,10 +1384,43 @@ def my_medication_plan():
             plan.updated_at
         )
 
+        for plan_time in plan_times:
+            seen_schedule_ids = set()
+            schedules = []
+
+            for link in plan_time.schedule_links:
+                schedule = link.schedule
+                user_medicine = schedule.user_medicine
+
+                if (
+                    schedule.plan_id != plan.plan_id
+                    or not schedule.is_active
+                    or not user_medicine.is_active
+                    or schedule.schedule_id in seen_schedule_ids
+                ):
+                    continue
+
+                seen_schedule_ids.add(schedule.schedule_id)
+                schedules.append(schedule)
+
+            schedules.sort(
+                key=lambda schedule: (
+                    schedule.user_medicine.medicine.item_name,
+                    schedule.schedule_id,
+                )
+            )
+            plan_time_entries.append(
+                {
+                    "plan_time": plan_time,
+                    "schedules": schedules,
+                }
+            )
+
     return render_template(
         "medication_plan.html",
         plan=plan,
         plan_times=plan_times,
+        plan_time_entries=plan_time_entries,
         plan_version=plan_version,
     )
 
@@ -1309,6 +1462,333 @@ def create_medication_plan():
         return redirect(url_for("my_medication_plan"))
 
     flash("복용약 일정이 만들어졌습니다.", "success")
+    return redirect(url_for("my_medication_plan"))
+
+
+@app.route(
+    "/medication-plans/<int:plan_id>/medicines/add",
+    methods=["GET"],
+)
+@login_required
+def select_medication_for_plan(plan_id):
+
+    plan = get_owned_active_medication_plan(plan_id)
+    plan_times = get_medication_plan_times(plan.plan_id)
+
+    if not plan_times:
+        flash("먼저 복용 시간을 하나 이상 추가해주세요.", "error")
+        return redirect(url_for("my_medication_plan"))
+
+    view_time = utc_now()
+    user_medicines = db.session.scalars(
+        db.select(UserMedicine)
+        .options(
+            selectinload(UserMedicine.medicine),
+            selectinload(UserMedicine.schedules).selectinload(
+                MedicationSchedule.times
+            ),
+        )
+        .join(UserMedicine.medicine)
+        .where(
+            UserMedicine.user_id == current_user.user_id,
+            UserMedicine.is_active.is_(True),
+        )
+        .order_by(
+            Medicine.item_name.asc(),
+            UserMedicine.user_medicine_id.asc(),
+        )
+    ).all()
+    medicine_options = []
+
+    for user_medicine in user_medicines:
+        active_schedule = next(
+            (
+                schedule
+                for schedule in user_medicine.schedules
+                if schedule.is_active
+            ),
+            None,
+        )
+        status = get_plan_schedule_addition_status(
+            user_medicine,
+            active_schedule,
+            plan_id=plan.plan_id,
+            reference_at=view_time,
+            timezone_name=current_user.timezone,
+        )
+        medicine_options.append(
+            {
+                "user_medicine": user_medicine,
+                "status": status,
+            }
+        )
+
+    return render_template(
+        "medication_plan_medicine_select.html",
+        plan=plan,
+        medicine_options=medicine_options,
+    )
+
+
+@app.route(
+    "/medication-plans/<int:plan_id>/medicines/"
+    "<int:user_medicine_id>/new",
+    methods=["GET", "POST"],
+)
+@login_required
+def add_medication_to_plan(plan_id, user_medicine_id):
+
+    plan = get_owned_active_medication_plan(plan_id)
+    user_medicine = get_owned_active_user_medicine(user_medicine_id)
+    plan_times = get_medication_plan_times(plan.plan_id)
+
+    if not plan_times:
+        flash("먼저 복용 시간을 하나 이상 추가해주세요.", "error")
+        return redirect(url_for("my_medication_plan"))
+
+    operation_time = utc_now()
+    active_schedule = get_active_medication_schedule(
+        user_medicine.user_medicine_id
+    )
+    addition_status = get_plan_schedule_addition_status(
+        user_medicine,
+        active_schedule,
+        plan_id=plan.plan_id,
+        reference_at=operation_time,
+        timezone_name=current_user.timezone,
+    )
+
+    if addition_status == "already_added":
+        flash("이미 일정에 추가된 복용약입니다.", "info")
+        return redirect(
+            url_for("select_medication_for_plan", plan_id=plan.plan_id)
+        )
+
+    if addition_status == "in_progress":
+        flash("현재 진행 중인 복용 설정이 있습니다.", "error")
+        return redirect(
+            url_for("select_medication_for_plan", plan_id=plan.plan_id)
+        )
+
+    old_updated_at = plan.updated_at
+    current_plan_version = serialize_medication_plan_version(
+        old_updated_at
+    )
+
+    if request.method == "GET":
+        try:
+            user_timezone = ZoneInfo(current_user.timezone)
+        except (ZoneInfoNotFoundError, TypeError, ValueError):
+            flash(
+                "시간대 설정을 확인할 수 없습니다. 다시 시도해주세요.",
+                "error",
+            )
+            return redirect(url_for("my_medication_plan"))
+
+        form_data = {
+            "dose_amount_text": "",
+            "dose_unit_text": "",
+            "intake_timing": "regardless_of_meal",
+            "start_date": operation_time.astimezone(
+                user_timezone
+            ).date().isoformat(),
+            "course_days": "1",
+            "reported_doses_taken_before_tracking": "0",
+            "selected_plan_time_ids": [],
+        }
+
+        return render_template(
+            "medication_plan_medicine_form.html",
+            plan=plan,
+            user_medicine=user_medicine,
+            plan_times=plan_times,
+            form_data=form_data,
+            errors=[],
+            plan_version=current_plan_version,
+        )
+
+    submitted_plan_version = request.form.get("plan_version", "")
+
+    if submitted_plan_version != current_plan_version:
+        db.session.rollback()
+        flash(
+            "다른 요청에서 복용 일정이 변경되었습니다. "
+            "최신 내용을 확인해주세요.",
+            "error",
+        )
+        return redirect(url_for("my_medication_plan"))
+
+    form_data = get_medication_plan_schedule_form_data()
+    validated_data, errors = validate_medication_schedule_details(
+        form_data
+    )
+    selected_plan_times, plan_time_errors = (
+        validate_selected_plan_times(
+            plan.plan_id,
+            form_data["selected_plan_time_ids"],
+        )
+    )
+    errors.extend(plan_time_errors)
+
+    if (
+        not errors
+        and "course_days" in validated_data
+        and "reported_doses_taken_before_tracking" in validated_data
+    ):
+        selected_times = tuple(
+            plan_time.time_of_day
+            for plan_time in selected_plan_times
+        )
+
+        try:
+            validate_plan_capacity(
+                times=selected_times,
+                course_days=validated_data["course_days"],
+                reported_doses_taken_before_tracking=(
+                    validated_data[
+                        "reported_doses_taken_before_tracking"
+                    ]
+                ),
+                accounted_occurrence_count=0,
+            )
+        except MedicationScheduleCalculationError:
+            errors.append(
+                "총 예정 복용 횟수는 이미 복용했다고 입력한 횟수보다 "
+                "적을 수 없습니다."
+            )
+        else:
+            try:
+                new_summary = calculate_occurrence_summary(
+                    start_date=validated_data["start_date"],
+                    course_days=validated_data["course_days"],
+                    times=selected_times,
+                    reported_doses_taken_before_tracking=(
+                        validated_data[
+                            "reported_doses_taken_before_tracking"
+                        ]
+                    ),
+                    accounted_occurrence_count=0,
+                    reminder_tracking_started_at=operation_time,
+                    reference_at=operation_time,
+                    timezone_name=current_user.timezone,
+                )
+            except MedicationScheduleCalculationError:
+                errors.append(
+                    "복용 일정을 계산할 수 없습니다. "
+                    "입력값과 시간대를 확인해주세요."
+                )
+            else:
+                if new_summary.remaining == 0:
+                    errors.append(
+                        "현재 일정에 추가하려면 남은 예정 복용 횟수가 "
+                        "있어야 합니다."
+                    )
+
+    if errors:
+        return (
+            render_template(
+                "medication_plan_medicine_form.html",
+                plan=plan,
+                user_medicine=user_medicine,
+                plan_times=plan_times,
+                form_data=form_data,
+                errors=errors,
+                plan_version=current_plan_version,
+            ),
+            400,
+        )
+
+    try:
+        claimed = claim_medication_plan_change(
+            plan,
+            old_updated_at=old_updated_at,
+            action_time=operation_time,
+        )
+
+        if not claimed:
+            db.session.rollback()
+            flash(
+                "다른 요청에서 복용 일정이 변경되었습니다. "
+                "최신 내용을 확인해주세요.",
+                "error",
+            )
+            return redirect(url_for("my_medication_plan"))
+
+        if active_schedule is not None:
+            active_schedule.is_active = False
+            active_schedule.closed_at = operation_time
+            active_schedule.updated_at = operation_time
+            db.session.flush()
+
+        new_schedule = MedicationSchedule(
+            user_medicine_id=user_medicine.user_medicine_id,
+            plan_id=plan.plan_id,
+            intake_timing=validated_data["intake_timing"],
+            dose_amount_text=validated_data["dose_amount_text"],
+            dose_unit_text=validated_data["dose_unit_text"],
+            instructions=None,
+            start_date=validated_data["start_date"],
+            end_date=None,
+            course_days=validated_data["course_days"],
+            reported_doses_taken_before_tracking=(
+                validated_data[
+                    "reported_doses_taken_before_tracking"
+                ]
+            ),
+            reminder_tracking_started_at=operation_time,
+            accounted_occurrence_count=0,
+            monday=True,
+            tuesday=True,
+            wednesday=True,
+            thursday=True,
+            friday=True,
+            saturday=True,
+            sunday=True,
+            is_active=True,
+            closed_at=None,
+            supersedes_schedule_id=None,
+            created_at=operation_time,
+            updated_at=operation_time,
+        )
+        db.session.add(new_schedule)
+        db.session.flush()
+
+        new_schedule.times.extend(
+            MedicationTime(time_of_day=plan_time.time_of_day)
+            for plan_time in selected_plan_times
+        )
+        db.session.flush()
+
+        db.session.add_all(
+            MedicationSchedulePlanTime(
+                plan_id=plan.plan_id,
+                schedule_id=new_schedule.schedule_id,
+                plan_time_id=plan_time.plan_time_id,
+            )
+            for plan_time in selected_plan_times
+        )
+        db.session.flush()
+
+        user_medicine.schedule_setup_pending = False
+        user_medicine.updated_at = operation_time
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        flash(
+            "복용 설정이 다른 요청에서 변경되었습니다. "
+            "최신 내용을 확인해주세요.",
+            "error",
+        )
+        return redirect(url_for("my_medication_plan"))
+    except SQLAlchemyError:
+        db.session.rollback()
+        flash(
+            "복용 설정을 저장하지 못했습니다. 다시 시도해주세요.",
+            "error",
+        )
+        return redirect(url_for("my_medication_plan"))
+
+    flash("복용약이 일정에 추가되었습니다.", "success")
     return redirect(url_for("my_medication_plan"))
 
 
@@ -1532,6 +2012,20 @@ def my_medicines():
         has_history = bool(schedules)
 
         if user_medicine.is_active:
+            if (
+                active_schedule is not None
+                and active_schedule.plan_id is not None
+            ):
+                current_medications.append(
+                    {
+                        "user_medicine": user_medicine,
+                        "status": "plan_bound",
+                        "schedule_id": active_schedule.schedule_id,
+                        "has_history": has_history,
+                    }
+                )
+                continue
+
             if user_medicine.schedule_setup_pending:
                 current_medications.append(
                     {
@@ -1663,6 +2157,7 @@ def medication_history(user_medicine_id):
         entry["can_restart"] = (
             not has_current_schedule
             and entry["status"] != "current"
+            and entry["schedule"].plan_id is None
         )
 
     return render_template(
@@ -1857,8 +2352,16 @@ def new_medication_schedule(user_medicine_id):
 @login_required
 def restart_medication_schedule(schedule_id):
 
-    restart_time = utc_now()
     source_schedule = get_owned_medication_schedule(schedule_id)
+
+    if source_schedule.plan_id is not None:
+        flash(
+            "이 복용 설정은 내 복용약 일정에서 관리됩니다.",
+            "info",
+        )
+        return redirect(url_for("my_medication_plan"))
+
+    restart_time = utc_now()
     user_medicine = source_schedule.user_medicine
     active_schedule = get_active_medication_schedule(
         user_medicine.user_medicine_id
@@ -2050,8 +2553,16 @@ def restart_medication_schedule(schedule_id):
 @login_required
 def edit_medication_schedule(schedule_id):
 
-    operation_time = utc_now()
     schedule = get_owned_editable_medication_schedule(schedule_id)
+
+    if schedule.plan_id is not None:
+        flash(
+            "이 복용 설정은 내 복용약 일정에서 관리됩니다.",
+            "info",
+        )
+        return redirect(url_for("my_medication_plan"))
+
+    operation_time = utc_now()
     user_medicine = schedule.user_medicine
 
     try:

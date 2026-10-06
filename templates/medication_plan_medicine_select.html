@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+    <meta charset="UTF-8">
+    <title>일정에 추가할 복용약</title>
+</head>
+
+<body>
+
+    <h1>내 복용약 일정에 추가</h1>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            <section aria-label="알림 메시지">
+                {% for category, message in messages %}
+                    <p role="{{ 'alert' if category == 'error' else 'status' }}">
+                        {{ message }}
+                    </p>
+                {% endfor %}
+            </section>
+        {% endif %}
+    {% endwith %}
+
+    {% if medicine_options %}
+        <ul>
+            {% for option in medicine_options %}
+                {% set user_medicine = option.user_medicine %}
+                <li data-user-medicine-id="{{ user_medicine.user_medicine_id }}">
+                    <strong>{{ user_medicine.medicine.item_name }}</strong>
+                    {% if option.status == 'available' %}
+                        <a href="{{ url_for(
+                            'add_medication_to_plan',
+                            plan_id=plan.plan_id,
+                            user_medicine_id=user_medicine.user_medicine_id
+                        ) }}">일정에 추가</a>
+                    {% elif option.status == 'already_added' %}
+                        <span>이미 일정에 추가됨</span>
+                    {% else %}
+                        <span>현재 복용 설정 사용 중</span>
+                    {% endif %}
+                </li>
+            {% endfor %}
+        </ul>
+    {% else %}
+        <p>추가할 수 있는 내 복용약이 없습니다.</p>
+    {% endif %}
+
+    <p><a href="{{ url_for('my_medication_plan') }}">내 복용약 일정으로 돌아가기</a></p>
+
+</body>
+
+</html>
