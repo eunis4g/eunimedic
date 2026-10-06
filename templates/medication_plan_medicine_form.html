@@ -3,12 +3,13 @@
 
 <head>
     <meta charset="UTF-8">
-    <title>{{ user_medicine.medicine.item_name }} 복용 설정</title>
+    <title>{{ heading }} - {{ user_medicine.medicine.item_name }}</title>
 </head>
 
 <body>
 
-    <h1>{{ user_medicine.medicine.item_name }} 복용 설정</h1>
+    <h1>{{ heading }}</h1>
+    <h2>{{ user_medicine.medicine.item_name }}</h2>
     <p>복용 값과 시간을 직접 선택해주세요.</p>
 
     {% with messages = get_flashed_messages(with_categories=true) %}
@@ -34,13 +35,16 @@
         </section>
     {% endif %}
 
-    <form method="POST" action="{{ url_for(
-        'add_medication_to_plan',
-        plan_id=plan.plan_id,
-        user_medicine_id=user_medicine.user_medicine_id
-    ) }}">
+    <form method="POST" action="{{ form_action }}">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <input type="hidden" name="plan_version" value="{{ plan_version }}">
+        {% if schedule_version is not none %}
+            <input
+                type="hidden"
+                name="schedule_version"
+                value="{{ schedule_version }}"
+            >
+        {% endif %}
 
         <fieldset>
             <legend>복용량</legend>
@@ -73,7 +77,7 @@
                 {% for value, label in [
                     ('before_meal', '식전'),
                     ('after_meal', '식후'),
-                    ('regardless_of_meal', '식사와 관계없음')
+                    ('regardless_of_meal', '식사와 관계없이')
                 ] %}
                     <option
                         value="{{ value }}"
@@ -137,14 +141,20 @@
             {% endfor %}
         </fieldset>
 
-        <button type="submit">일정에 추가</button>
+        <button type="submit">{{ submit_label }}</button>
     </form>
 
     <p>
-        <a href="{{ url_for(
-            'select_medication_for_plan',
-            plan_id=plan.plan_id
-        ) }}">복용약 선택으로 돌아가기</a>
+        {% if mode == 'edit' %}
+            <a href="{{ url_for('my_medication_plan') }}">
+                내 복용약 일정으로 돌아가기
+            </a>
+        {% else %}
+            <a href="{{ url_for(
+                'select_medication_for_plan',
+                plan_id=plan.plan_id
+            ) }}">복용약 선택으로 돌아가기</a>
+        {% endif %}
     </p>
 
     <script>

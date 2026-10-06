@@ -33,6 +33,25 @@
             <button type="submit">새 복용 일정 만들기</button>
         </form>
     {% else %}
+        <section aria-labelledby="current-plan-medicines-heading">
+            <h2 id="current-plan-medicines-heading">현재 복용약</h2>
+            {% if current_plan_schedules %}
+                <ul>
+                    {% for schedule in current_plan_schedules %}
+                        <li data-current-schedule-id="{{ schedule.schedule_id }}">
+                            {{ schedule.user_medicine.medicine.item_name }}
+                            <a href="{{ url_for(
+                                'edit_medication_schedule',
+                                schedule_id=schedule.schedule_id
+                            ) }}">복용 일정 수정</a>
+                        </li>
+                    {% endfor %}
+                </ul>
+            {% else %}
+                <p>현재 일정에 등록된 복용약이 없습니다.</p>
+            {% endif %}
+        </section>
+
         <section aria-labelledby="medication-plan-times-heading">
             <h2 id="medication-plan-times-heading">복용 시간</h2>
             <p>복용 시간은 일정에 약을 추가할 때 선택할 수 있습니다.</p>

@@ -288,6 +288,7 @@ class MedicationPlanRouteTest(unittest.TestCase):
         course_days=3,
         medication_times=(time(20, 0),),
         reported=0,
+        accounted=0,
         pending=False,
     ):
         user_medicine.schedule_setup_pending = pending
@@ -303,7 +304,7 @@ class MedicationPlanRouteTest(unittest.TestCase):
             course_days=course_days,
             reported_doses_taken_before_tracking=reported,
             reminder_tracking_started_at=tracking_started_at,
-            accounted_occurrence_count=0,
+            accounted_occurrence_count=accounted,
             monday=True,
             tuesday=True,
             wednesday=True,
@@ -383,6 +384,63 @@ class MedicationPlanRouteTest(unittest.TestCase):
         )
         payload["csrf_token"] = token
 
+        return self.client.post(url, data=payload)
+
+    def plan_schedule_edit_url(self, schedule):
+        return f"/medication-schedules/{schedule.schedule_id}/edit"
+
+    def valid_plan_schedule_edit_form(
+        self,
+        schedule,
+        plan,
+        plan_times,
+        **overrides,
+    ):
+        db.session.refresh(schedule)
+        form_data = {
+            "dose_amount_text": "2",
+            "dose_unit_text": "정",
+            "intake_timing": "before_meal",
+            "start_date": "2099-02-01",
+            "course_days": "4",
+            "reported_doses_taken_before_tracking": "0",
+            "selected_plan_time_ids": [
+                str(plan_time.plan_time_id)
+                for plan_time in plan_times
+            ],
+            "plan_version": self.plan_version(plan),
+            "schedule_version": (
+                app_module.serialize_schedule_version(
+                    schedule.updated_at
+                )
+            ),
+        }
+        form_data.update(overrides)
+        return form_data
+
+    def post_plan_schedule_edit(
+        self,
+        schedule,
+        plan,
+        plan_times,
+        *,
+        form_data=None,
+        token=None,
+    ):
+        url = self.plan_schedule_edit_url(schedule)
+
+        if token is None:
+            token = self.get_csrf_token("/my-medication-plan")
+
+        payload = dict(
+            form_data
+            or self.valid_plan_schedule_edit_form(
+                schedule,
+                plan,
+                plan_times,
+            )
+        )
+        payload["csrf_token"] = token
         return self.client.post(url, data=payload)
 
     def test_login_required_and_csrf_protection(self):
@@ -1673,7 +1731,605 @@ class MedicationPlanRouteTest(unittest.TestCase):
             db.session.get(MedicationPlanTime, plan_time.plan_time_id)
         )
 
-    def test_plan_bound_legacy_routes_and_links_are_protected(self):
+    def test_plan_schedule_edit_get_uses_links_and_is_read_only(self):
+        self.log_in()
+        plan = self.add_plan()
+        morning = self.add_plan_time(plan, time(8, 0))
+        evening = self.add_plan_time(plan, time(20, 0))
+        schedule = self.add_existing_schedule(
+            self.user_medicine,
+            plan=plan,
+            plan_times=(morning,),
+            medication_times=(time(20, 0),),
+        )
+        before = (
+            db.session.query(MedicationSchedule).count(),
+            db.session.query(MedicationTime).count(),
+            db.session.query(MedicationSchedulePlanTime).count(),
+            schedule.updated_at,
+            plan.updated_at,
+        )
+
+        response = self.client.get(self.plan_schedule_edit_url(schedule))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("복용 일정 수정".encode(), response.data)
+        self.assertIn(b'name="plan_version"', response.data)
+        self.assertIn(b'name="schedule_version"', response.data)
+        morning_pattern = (
+            rb'value="' + str(morning.plan_time_id).encode()
+            + rb'"\s+checked'
+        )
+        evening_pattern = (
+            rb'value="' + str(evening.plan_time_id).encode()
+            + rb'"\s+checked'
+        )
+        self.assertRegex(response.data, morning_pattern)
+        self.assertNotRegex(response.data, evening_pattern)
+        db.session.refresh(schedule)
+        db.session.refresh(plan)
+        after = (
+            db.session.query(MedicationSchedule).count(),
+            db.session.query(MedicationTime).count(),
+            db.session.query(MedicationSchedulePlanTime).count(),
+            schedule.updated_at,
+            plan.updated_at,
+        )
+        self.assertEqual(after, before)
+
+    def test_plan_schedule_edit_creates_an_immutable_successor(self):
+        self.log_in()
+        plan = self.add_plan()
+        morning = self.add_plan_time(plan, time(8, 0))
+        evening = self.add_plan_time(plan, time(20, 0))
+        schedule = self.add_existing_schedule(
+            self.user_medicine,
+            plan=plan,
+            plan_times=(morning,),
+            medication_times=(time(8, 0),),
+            accounted=2,
+            pending=True,
+        )
+        old_id = schedule.schedule_id
+        old_values = (
+            schedule.dose_amount_text,
+            schedule.intake_timing,
+            schedule.start_date,
+            schedule.course_days,
+            schedule.reported_doses_taken_before_tracking,
+            schedule.accounted_occurrence_count,
+        )
+        form_data = self.valid_plan_schedule_edit_form(
+            schedule,
+            plan,
+            (evening,),
+            reported_doses_taken_before_tracking="1",
+        )
+
+        with patch.object(
+            app_module,
+            "utc_now",
+            return_value=SECOND_ACTION_TIME,
+        ):
+            response = self.post_plan_schedule_edit(
+                schedule,
+                plan,
+                (evening,),
+                form_data=form_data,
+            )
+
+        self.assertEqual(response.status_code, 302)
+        old_schedule = db.session.get(MedicationSchedule, old_id)
+        successor = db.session.scalar(
+            db.select(MedicationSchedule).where(
+                MedicationSchedule.supersedes_schedule_id == old_id
+            )
+        )
+        self.assertIsNotNone(successor)
+        self.assertFalse(old_schedule.is_active)
+        self.assertEqual(
+            app_module.as_utc(old_schedule.closed_at),
+            SECOND_ACTION_TIME,
+        )
+        self.assertEqual(
+            (
+                old_schedule.dose_amount_text,
+                old_schedule.intake_timing,
+                old_schedule.start_date,
+                old_schedule.course_days,
+                old_schedule.reported_doses_taken_before_tracking,
+                old_schedule.accounted_occurrence_count,
+            ),
+            old_values,
+        )
+        self.assertEqual(
+            [value.time_of_day for value in old_schedule.times],
+            [time(8, 0)],
+        )
+        self.assertEqual(
+            [link.plan_time_id for link in old_schedule.plan_time_links],
+            [morning.plan_time_id],
+        )
+        self.assertEqual(successor.user_medicine_id, schedule.user_medicine_id)
+        self.assertEqual(successor.plan_id, plan.plan_id)
+        self.assertEqual(successor.supersedes_schedule_id, old_id)
+        self.assertEqual(successor.dose_amount_text, "2")
+        self.assertEqual(successor.reported_doses_taken_before_tracking, 1)
+        self.assertEqual(successor.accounted_occurrence_count, 2)
+        self.assertTrue(successor.is_active)
+        self.assertEqual(
+            [value.time_of_day for value in successor.times],
+            [time(20, 0)],
+        )
+        self.assertEqual(
+            [link.plan_time_id for link in successor.plan_time_links],
+            [evening.plan_time_id],
+        )
+        db.session.refresh(self.user_medicine)
+        self.assertTrue(self.user_medicine.schedule_setup_pending)
+
+    def test_plan_schedule_edit_accumulates_only_elapsed_segment(self):
+        self.log_in()
+        plan = self.add_plan()
+        afternoon = self.add_plan_time(plan, time(15, 0))
+        schedule = self.add_existing_schedule(
+            self.user_medicine,
+            plan=plan,
+            plan_times=(afternoon,),
+            start_date_value=date(2026, 10, 6),
+            tracking_started_at=datetime(2026, 10, 6, 0, 0, tzinfo=UTC),
+            course_days=5,
+            medication_times=(time(15, 0),),
+            reported=1,
+            accounted=2,
+        )
+        form_data = self.valid_plan_schedule_edit_form(
+            schedule,
+            plan,
+            (afternoon,),
+            start_date="2026-10-06",
+            course_days="8",
+            reported_doses_taken_before_tracking="1",
+        )
+
+        with patch.object(
+            app_module,
+            "utc_now",
+            return_value=SECOND_ACTION_TIME,
+        ):
+            self.post_plan_schedule_edit(
+                schedule,
+                plan,
+                (afternoon,),
+                form_data=form_data,
+            )
+
+        successor = db.session.scalar(
+            db.select(MedicationSchedule).where(
+                MedicationSchedule.supersedes_schedule_id
+                == schedule.schedule_id
+            )
+        )
+        self.assertEqual(successor.accounted_occurrence_count, 3)
+        self.assertEqual(successor.reported_doses_taken_before_tracking, 1)
+
+    def test_plan_schedule_edit_capacity_equality_creates_inactive_version(self):
+        self.log_in()
+        plan = self.add_plan()
+        plan_time = self.add_plan_time(plan, time(20, 0))
+        schedule = self.add_existing_schedule(
+            self.user_medicine,
+            plan=plan,
+            plan_times=(plan_time,),
+        )
+        form_data = self.valid_plan_schedule_edit_form(
+            schedule,
+            plan,
+            (plan_time,),
+            course_days="1",
+            reported_doses_taken_before_tracking="1",
+        )
+
+        with patch.object(
+            app_module,
+            "utc_now",
+            return_value=SECOND_ACTION_TIME,
+        ):
+            response = self.post_plan_schedule_edit(
+                schedule,
+                plan,
+                (plan_time,),
+                form_data=form_data,
+            )
+
+        self.assertEqual(response.status_code, 302)
+        successor = db.session.scalar(
+            db.select(MedicationSchedule).where(
+                MedicationSchedule.supersedes_schedule_id
+                == schedule.schedule_id
+            )
+        )
+        self.assertIsNotNone(successor)
+        self.assertFalse(successor.is_active)
+
+    def test_effectively_complete_plan_schedule_get_and_post(self):
+        self.log_in()
+        plan = self.add_plan()
+        plan_time = self.add_plan_time(plan, time(20, 0))
+        schedule = self.add_existing_schedule(
+            self.user_medicine,
+            plan=plan,
+            plan_times=(plan_time,),
+            course_days=3,
+            reported=3,
+        )
+        schedule_id = schedule.schedule_id
+        before_updated_at = schedule.updated_at
+
+        get_response = self.client.get(
+            self.plan_schedule_edit_url(schedule)
+        )
+        self.assertEqual(get_response.status_code, 302)
+        db.session.refresh(schedule)
+        self.assertTrue(schedule.is_active)
+        self.assertEqual(schedule.updated_at, before_updated_at)
+
+        form_data = self.valid_plan_schedule_edit_form(
+            schedule,
+            plan,
+            (plan_time,),
+        )
+        with patch.object(
+            app_module,
+            "utc_now",
+            return_value=SECOND_ACTION_TIME,
+        ):
+            post_response = self.post_plan_schedule_edit(
+                schedule,
+                plan,
+                (plan_time,),
+                form_data=form_data,
+            )
+
+        self.assertEqual(post_response.status_code, 302)
+        stored = db.session.get(MedicationSchedule, schedule_id)
+        self.assertFalse(stored.is_active)
+        self.assertEqual(app_module.as_utc(stored.closed_at), SECOND_ACTION_TIME)
+        self.assertIsNone(
+            db.session.scalar(
+                db.select(MedicationSchedule).where(
+                    MedicationSchedule.supersedes_schedule_id == schedule_id
+                )
+            )
+        )
+
+    def test_plan_schedule_edit_rejects_invalid_inputs_without_writes(self):
+        self.log_in()
+        plan = self.add_plan()
+        plan_time = self.add_plan_time(plan, time(20, 0))
+        other_plan = self.add_plan(user_id=self.other_user_id)
+        other_time = self.add_plan_time(other_plan, time(8, 0))
+        schedule = self.add_existing_schedule(
+            self.user_medicine,
+            plan=plan,
+            plan_times=(plan_time,),
+        )
+        invalid_overrides = (
+            {"selected_plan_time_ids": []},
+            {"selected_plan_time_ids": ["abc"]},
+            {"selected_plan_time_ids": [
+                str(plan_time.plan_time_id),
+                str(plan_time.plan_time_id),
+            ]},
+            {"selected_plan_time_ids": [str(other_time.plan_time_id)]},
+            {"dose_amount_text": "0"},
+            {
+                "course_days": "1",
+                "reported_doses_taken_before_tracking": "2",
+            },
+        )
+
+        for overrides in invalid_overrides:
+            with self.subTest(overrides=overrides):
+                form_data = self.valid_plan_schedule_edit_form(
+                    schedule,
+                    plan,
+                    (plan_time,),
+                    **overrides,
+                )
+                response = self.post_plan_schedule_edit(
+                    schedule,
+                    plan,
+                    (plan_time,),
+                    form_data=form_data,
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(
+                    db.session.query(MedicationSchedule).count(),
+                    1,
+                )
+                db.session.refresh(schedule)
+                self.assertTrue(schedule.is_active)
+
+    def test_plan_schedule_edit_rejects_stale_versions_and_claims(self):
+        self.log_in()
+        plan = self.add_plan()
+        plan_time = self.add_plan_time(plan, time(20, 0))
+        schedule = self.add_existing_schedule(
+            self.user_medicine,
+            plan=plan,
+            plan_times=(plan_time,),
+        )
+        cases = (
+            ({"plan_version": "stale"}, None),
+            ({"schedule_version": "stale"}, None),
+            ({}, "plan"),
+            ({}, "schedule"),
+        )
+
+        for overrides, failed_claim in cases:
+            with self.subTest(overrides=overrides, failed_claim=failed_claim):
+                form_data = self.valid_plan_schedule_edit_form(
+                    schedule,
+                    plan,
+                    (plan_time,),
+                    **overrides,
+                )
+                if failed_claim == "plan":
+                    mocked = patch.object(
+                        app_module,
+                        "claim_medication_plan_change",
+                        return_value=False,
+                    )
+                elif failed_claim == "schedule":
+                    mocked = patch.object(
+                        app_module,
+                        "claim_medication_schedule_edit",
+                        return_value=False,
+                    )
+                else:
+                    mocked = patch.object(
+                        app_module,
+                        "claim_medication_plan_change",
+                        wraps=app_module.claim_medication_plan_change,
+                    )
+
+                with mocked:
+                    response = self.post_plan_schedule_edit(
+                        schedule,
+                        plan,
+                        (plan_time,),
+                        form_data=form_data,
+                    )
+
+                self.assertEqual(response.status_code, 302)
+                self.assertEqual(
+                    db.session.query(MedicationSchedule).count(),
+                    1,
+                )
+                db.session.refresh(schedule)
+                db.session.refresh(plan)
+                self.assertTrue(schedule.is_active)
+
+    def test_plan_schedule_edit_commit_failure_rolls_back_every_stage(self):
+        self.log_in()
+        plan = self.add_plan()
+        plan_time = self.add_plan_time(plan, time(20, 0))
+        schedule = self.add_existing_schedule(
+            self.user_medicine,
+            plan=plan,
+            plan_times=(plan_time,),
+        )
+        old_plan_updated_at = plan.updated_at
+        failure = SQLAlchemyError("commit failed")
+
+        with patch.object(
+            app_module,
+            "utc_now",
+            return_value=SECOND_ACTION_TIME,
+        ), patch.object(db.session, "commit", side_effect=failure):
+            response = self.post_plan_schedule_edit(
+                schedule,
+                plan,
+                (plan_time,),
+            )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(db.session.query(MedicationSchedule).count(), 1)
+        db.session.refresh(schedule)
+        db.session.refresh(plan)
+        self.assertTrue(schedule.is_active)
+        self.assertIsNone(schedule.closed_at)
+        self.assertEqual(plan.updated_at, old_plan_updated_at)
+
+    def test_plan_schedule_link_corruption_is_safe(self):
+        self.log_in()
+        plan = self.add_plan()
+        plan_time = self.add_plan_time(plan, time(20, 0))
+        schedule = self.add_existing_schedule(
+            self.user_medicine,
+            plan=plan,
+            plan_times=(plan_time,),
+        )
+        db.session.delete(schedule.plan_time_links[0])
+        db.session.commit()
+
+        response = self.client.get(self.plan_schedule_edit_url(schedule))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/my-medication-plan", response.headers["Location"])
+        db.session.refresh(schedule)
+        self.assertTrue(schedule.is_active)
+
+    def test_closed_plan_version_history_stops_at_closed_at(self):
+        self.log_in()
+        plan = self.add_plan()
+        plan_time = self.add_plan_time(plan, time(20, 0))
+        schedule = self.add_existing_schedule(
+            self.user_medicine,
+            plan=plan,
+            plan_times=(plan_time,),
+            start_date_value=date(2099, 1, 1),
+        )
+        form_data = self.valid_plan_schedule_edit_form(
+            schedule,
+            plan,
+            (plan_time,),
+        )
+        with patch.object(
+            app_module,
+            "utc_now",
+            return_value=SECOND_ACTION_TIME,
+        ):
+            self.post_plan_schedule_edit(
+                schedule,
+                plan,
+                (plan_time,),
+                form_data=form_data,
+            )
+
+        old_schedule = db.session.get(
+            MedicationSchedule,
+            schedule.schedule_id,
+        )
+        entry = app_module.build_schedule_history_entry(
+            self.user_medicine,
+            old_schedule,
+            reference_at=datetime(2100, 1, 1, tzinfo=UTC),
+            timezone_name=self.user.timezone,
+        )
+        self.assertEqual(entry["status"], "past")
+        self.assertEqual(entry["medication_times"], (time(20, 0),))
+
+    def test_inactive_predecessor_link_does_not_block_time_delete(self):
+        self.log_in()
+        plan = self.add_plan()
+        morning = self.add_plan_time(plan, time(8, 0))
+        evening = self.add_plan_time(plan, time(20, 0))
+        schedule = self.add_existing_schedule(
+            self.user_medicine,
+            plan=plan,
+            plan_times=(morning,),
+            medication_times=(time(8, 0),),
+        )
+        with patch.object(
+            app_module,
+            "utc_now",
+            return_value=SECOND_ACTION_TIME,
+        ):
+            self.post_plan_schedule_edit(
+                schedule,
+                plan,
+                (evening,),
+            )
+
+        db.session.refresh(plan)
+        morning_response = self.post_delete_time(plan, morning)
+        self.assertEqual(morning_response.status_code, 302)
+        self.assertIsNone(
+            db.session.get(MedicationPlanTime, morning.plan_time_id)
+        )
+
+        db.session.refresh(plan)
+        evening_response = self.post_delete_time(plan, evening)
+        self.assertEqual(evening_response.status_code, 302)
+        self.assertIsNotNone(
+            db.session.get(MedicationPlanTime, evening.plan_time_id)
+        )
+
+    def test_plan_schedule_edit_requires_login_csrf_and_strict_ownership(self):
+        plan = self.add_plan()
+        plan_time = self.add_plan_time(plan, time(20, 0))
+        schedule = self.add_existing_schedule(
+            self.user_medicine,
+            plan=plan,
+            plan_times=(plan_time,),
+        )
+        edit_url = self.plan_schedule_edit_url(schedule)
+
+        anonymous_response = self.client.get(edit_url)
+        self.assertEqual(anonymous_response.status_code, 302)
+        self.assertIn("/login", anonymous_response.headers["Location"])
+
+        self.log_in()
+        self.assertEqual(self.client.post(edit_url).status_code, 400)
+
+        other_plan = self.add_plan(user_id=self.other_user_id)
+        other_time = self.add_plan_time(other_plan, time(8, 0))
+        other_schedule = self.add_existing_schedule(
+            self.other_user_medicine,
+            plan=other_plan,
+            plan_times=(other_time,),
+            medication_times=(time(8, 0),),
+        )
+        self.assertEqual(
+            self.client.get(
+                self.plan_schedule_edit_url(other_schedule)
+            ).status_code,
+            404,
+        )
+
+        plan.is_active = False
+        db.session.commit()
+        self.assertEqual(self.client.get(edit_url).status_code, 404)
+        plan.is_active = True
+        db.session.commit()
+
+        self.user_medicine.is_active = False
+        db.session.commit()
+        self.assertEqual(self.client.get(edit_url).status_code, 404)
+        self.user_medicine.is_active = True
+        db.session.commit()
+
+        schedule.is_active = False
+        db.session.commit()
+        self.assertEqual(self.client.get(edit_url).status_code, 404)
+
+    def test_repeated_plan_edits_link_each_immediate_predecessor(self):
+        self.log_in()
+        plan = self.add_plan()
+        plan_time = self.add_plan_time(plan, time(20, 0))
+        first = self.add_existing_schedule(
+            self.user_medicine,
+            plan=plan,
+            plan_times=(plan_time,),
+        )
+
+        with patch.object(
+            app_module,
+            "utc_now",
+            return_value=SECOND_ACTION_TIME,
+        ):
+            self.post_plan_schedule_edit(first, plan, (plan_time,))
+
+        second = db.session.scalar(
+            db.select(MedicationSchedule).where(
+                MedicationSchedule.supersedes_schedule_id
+                == first.schedule_id
+            )
+        )
+        db.session.refresh(plan)
+        third_edit_time = SECOND_ACTION_TIME + timedelta(minutes=1)
+
+        with patch.object(
+            app_module,
+            "utc_now",
+            return_value=third_edit_time,
+        ):
+            self.post_plan_schedule_edit(second, plan, (plan_time,))
+
+        third = db.session.scalar(
+            db.select(MedicationSchedule).where(
+                MedicationSchedule.supersedes_schedule_id
+                == second.schedule_id
+            )
+        )
+        self.assertEqual(second.supersedes_schedule_id, first.schedule_id)
+        self.assertIsNotNone(third)
+        self.assertEqual(third.supersedes_schedule_id, second.schedule_id)
+        self.assertNotEqual(third.supersedes_schedule_id, first.schedule_id)
+
+    def test_plan_bound_edit_is_enabled_but_restart_stays_blocked(self):
         self.log_in()
         plan = self.add_plan()
         plan_time = self.add_plan_time(plan, time(20, 0))
@@ -1687,8 +2343,11 @@ class MedicationPlanRouteTest(unittest.TestCase):
         edit_url = f"/medication-schedules/{schedule.schedule_id}/edit"
         restart_url = f"/medication-schedules/{schedule.schedule_id}/restart"
 
+        edit_response = self.client.get(edit_url)
+        self.assertEqual(edit_response.status_code, 200)
+        self.assertIn(b'name="schedule_version"', edit_response.data)
+
         for method, url in (
-            ("get", edit_url),
             ("post", edit_url),
             ("get", restart_url),
             ("post", restart_url),
@@ -1714,6 +2373,10 @@ class MedicationPlanRouteTest(unittest.TestCase):
             f'href="{edit_url}"'.encode(),
             medicines_page.data,
         )
+
+        plan_page = self.client.get("/my-medication-plan")
+        self.assertIn(f'href="{edit_url}"'.encode(), plan_page.data)
+        self.assertEqual(plan_page.data.count(f'href="{edit_url}"'.encode()), 1)
 
         history_only_medicine = self.add_user_medicine("HISTORY")
         history_schedule = self.add_existing_schedule(
