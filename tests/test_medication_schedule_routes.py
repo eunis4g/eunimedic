@@ -1,13 +1,13 @@
 import re
 import tempfile
 import unittest
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from flask import g
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect as sqlalchemy_inspect
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 import app as app_module
@@ -20,6 +20,14 @@ from models import (
     db,
     utc_now,
 )
+from services.medication_schedule_service import (
+    generate_future_occurrences,
+)
+
+
+EDIT_TRACKING_TIME = datetime(2026, 10, 5, 5, 0, tzinfo=UTC)
+FIRST_EDIT_TIME = datetime(2026, 10, 6, 6, 0, tzinfo=UTC)
+SECOND_EDIT_TIME = datetime(2026, 10, 6, 23, 0, tzinfo=UTC)
 
 
 class MedicationScheduleRouteTest(unittest.TestCase):
@@ -133,6 +141,9 @@ class MedicationScheduleRouteTest(unittest.TestCase):
             f"/my-medicines/{self.user_medicine_id}/schedule/new"
         )
 
+    def edit_url(self, schedule_id):
+        return f"/medication-schedules/{schedule_id}/edit"
+
     def log_in(self):
         with self.client.session_transaction() as session:
             session["_user_id"] = str(self.user_id)
@@ -180,15 +191,19 @@ class MedicationScheduleRouteTest(unittest.TestCase):
         course_days=3,
         medication_times=(time(9, 0),),
         reported=0,
+        accounted=0,
         active=True,
+        dose_amount_text="1",
+        dose_unit_text="정",
+        intake_timing="after_meal",
     ):
         schedule = MedicationSchedule(
             user_medicine_id=(
                 user_medicine_id or self.user_medicine_id
             ),
-            intake_timing="after_meal",
-            dose_amount_text="1",
-            dose_unit_text="정",
+            intake_timing=intake_timing,
+            dose_amount_text=dose_amount_text,
+            dose_unit_text=dose_unit_text,
             instructions=None,
             start_date=start_date_value,
             end_date=None,
@@ -197,7 +212,7 @@ class MedicationScheduleRouteTest(unittest.TestCase):
             reminder_tracking_started_at=(
                 tracking_started_at or utc_now()
             ),
-            accounted_occurrence_count=0,
+            accounted_occurrence_count=accounted,
             monday=True,
             tuesday=True,
             wednesday=True,
@@ -214,6 +229,41 @@ class MedicationScheduleRouteTest(unittest.TestCase):
         db.session.add(schedule)
         db.session.commit()
         return schedule
+
+    def valid_edit_form_data(self, schedule, **overrides):
+        form_data = {
+            "dose_amount_text": schedule.dose_amount_text,
+            "dose_unit_text": schedule.dose_unit_text,
+            "intake_timing": schedule.intake_timing,
+            "daily_frequency": str(len(schedule.times)),
+            "medication_times": [
+                value.time_of_day.strftime("%H:%M")
+                for value in schedule.times
+            ],
+            "start_date": schedule.start_date.isoformat(),
+            "course_days": str(schedule.course_days),
+            "reported_doses_taken_before_tracking": str(
+                schedule.reported_doses_taken_before_tracking
+            ),
+            "schedule_version": (
+                app_module.serialize_schedule_version(
+                    schedule.updated_at
+                )
+            ),
+        }
+        form_data.update(overrides)
+        return form_data
+
+    def post_edit(self, schedule, form_data=None, *, token=None):
+        if token is None:
+            token = self.get_csrf_token("/my-medicines")
+
+        payload = form_data or self.valid_edit_form_data(schedule)
+        payload["csrf_token"] = token
+        return self.client.post(
+            self.edit_url(schedule.schedule_id),
+            data=payload,
+        )
 
     def test_login_is_required_for_get_and_post(self):
         get_response = self.client.get(self.schedule_url)
@@ -695,6 +745,678 @@ class MedicationScheduleRouteTest(unittest.TestCase):
             0,
         )
 
+    def test_edit_login_is_required_for_get_and_post(self):
+        schedule = self.add_schedule()
+        get_response = self.client.get(
+            self.edit_url(schedule.schedule_id)
+        )
+        self.assertEqual(get_response.status_code, 302)
+        self.assertIn("/login", get_response.headers["Location"])
+
+        login_page = self.client.get("/login")
+        token_match = re.search(
+            rb'name="csrf_token"\s+value="([^"]+)"',
+            login_page.data,
+        )
+        self.assertIsNotNone(token_match)
+        form_data = self.valid_edit_form_data(schedule)
+        form_data["csrf_token"] = token_match.group(1).decode("utf-8")
+        post_response = self.client.post(
+            self.edit_url(schedule.schedule_id),
+            data=form_data,
+        )
+        self.assertEqual(post_response.status_code, 302)
+        self.assertIn("/login", post_response.headers["Location"])
+
+    def test_edit_ownership_and_active_states_are_hidden(self):
+        self.log_in()
+        other_schedule = self.add_schedule(
+            user_medicine_id=self.other_user_medicine_id,
+        )
+        inactive_schedule = self.add_schedule(active=False)
+        inactive_user_medicine_schedule = self.add_schedule(
+            user_medicine_id=self.inactive_user_medicine_id,
+        )
+        token = self.get_csrf_token("/my-medicines")
+
+        for schedule in (
+            other_schedule,
+            inactive_schedule,
+            inactive_user_medicine_schedule,
+        ):
+            with self.subTest(schedule_id=schedule.schedule_id):
+                get_response = self.client.get(
+                    self.edit_url(schedule.schedule_id)
+                )
+                self.assertEqual(get_response.status_code, 404)
+                form_data = self.valid_edit_form_data(schedule)
+                form_data["csrf_token"] = token
+                post_response = self.client.post(
+                    self.edit_url(schedule.schedule_id),
+                    data=form_data,
+                )
+                self.assertEqual(post_response.status_code, 404)
+
+    def test_edit_post_without_csrf_is_rejected(self):
+        self.log_in()
+        schedule = self.add_schedule()
+        response = self.client.post(
+            self.edit_url(schedule.schedule_id),
+            data=self.valid_edit_form_data(schedule),
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_edit_get_populates_form_without_database_changes(self):
+        self.log_in()
+        schedule = self.add_schedule(
+            medication_times=(time(8, 0), time(14, 0), time(20, 0)),
+            reported=1,
+            accounted=2,
+            dose_amount_text="0.5",
+            dose_unit_text="캡슐",
+            intake_timing="before_meal",
+        )
+        schedule_id = schedule.schedule_id
+        old_updated_at = schedule.updated_at
+        old_tracking_started_at = schedule.reminder_tracking_started_at
+        old_time_ids = [value.medication_time_id for value in schedule.times]
+
+        response = self.client.get(self.edit_url(schedule_id))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("복용 설정 수정".encode(), response.data)
+        self.assertIn(b'value="0.5"', response.data)
+        self.assertIn("캡슐".encode(), response.data)
+        for value in (b'value="08:00"', b'value="14:00"', b'value="20:00"'):
+            self.assertIn(value, response.data)
+        self.assertIn(b'name="schedule_version"', response.data)
+
+        db.session.expire_all()
+        stored = db.session.get(MedicationSchedule, schedule_id)
+        self.assertTrue(stored.is_active)
+        self.assertEqual(stored.accounted_occurrence_count, 2)
+        self.assertEqual(stored.updated_at, old_updated_at)
+        self.assertEqual(
+            stored.reminder_tracking_started_at,
+            old_tracking_started_at,
+        )
+        self.assertEqual(
+            [value.medication_time_id for value in stored.times],
+            old_time_ids,
+        )
+
+    def test_expired_open_edit_get_redirects_without_writing(self):
+        self.log_in()
+        schedule = self.add_schedule(
+            start_date_value=date(2020, 1, 1),
+            tracking_started_at=datetime(2020, 1, 1, tzinfo=UTC),
+            course_days=1,
+            medication_times=(time(8, 0),),
+        )
+        schedule_id = schedule.schedule_id
+        old_updated_at = schedule.updated_at
+        old_tracking_started_at = schedule.reminder_tracking_started_at
+        old_time_id = schedule.times[0].medication_time_id
+
+        response = self.client.get(self.edit_url(schedule_id))
+
+        self.assertEqual(response.status_code, 302)
+        db.session.expire_all()
+        stored = db.session.get(MedicationSchedule, schedule_id)
+        self.assertTrue(stored.is_active)
+        self.assertEqual(stored.updated_at, old_updated_at)
+        self.assertEqual(
+            stored.reminder_tracking_started_at,
+            old_tracking_started_at,
+        )
+        self.assertEqual(stored.times[0].medication_time_id, old_time_id)
+
+    def test_expired_open_edit_post_deactivates_atomically(self):
+        self.log_in()
+        schedule = self.add_schedule(
+            start_date_value=date(2020, 1, 1),
+            tracking_started_at=datetime(2020, 1, 1, tzinfo=UTC),
+            course_days=1,
+            medication_times=(time(8, 0),),
+        )
+        schedule_id = schedule.schedule_id
+        form_data = self.valid_edit_form_data(schedule)
+        token = self.get_csrf_token("/my-medicines")
+
+        with patch.object(
+            app_module,
+            "utc_now",
+            return_value=FIRST_EDIT_TIME,
+        ) as mocked_utc_now:
+            response = self.post_edit(
+                schedule,
+                form_data,
+                token=token,
+            )
+
+        self.assertEqual(mocked_utc_now.call_count, 1)
+        self.assertEqual(response.status_code, 302)
+        db.session.expire_all()
+        self.assertFalse(
+            db.session.get(MedicationSchedule, schedule_id).is_active
+        )
+
+    def test_edit_updates_all_editable_fields_and_replaces_times(self):
+        self.log_in()
+        schedule = self.add_schedule(
+            medication_times=(time(8, 0), time(20, 0)),
+        )
+        old_time_rows = list(schedule.times)
+        form_data = self.valid_edit_form_data(
+            schedule,
+            dose_amount_text="2.25",
+            dose_unit_text="포",
+            intake_timing="before_meal",
+            daily_frequency="2",
+            medication_times=["09:00", "21:00"],
+            start_date="2026-10-06",
+            course_days="5",
+            reported_doses_taken_before_tracking="1",
+        )
+
+        response = self.post_edit(schedule, form_data)
+
+        self.assertEqual(response.status_code, 302)
+        db.session.expire_all()
+        stored = db.session.get(MedicationSchedule, schedule.schedule_id)
+        self.assertEqual(stored.dose_amount_text, "2.25")
+        self.assertEqual(stored.dose_unit_text, "포")
+        self.assertEqual(stored.intake_timing, "before_meal")
+        self.assertEqual(stored.start_date, date(2026, 10, 6))
+        self.assertEqual(stored.course_days, 5)
+        self.assertEqual(
+            stored.reported_doses_taken_before_tracking,
+            1,
+        )
+        self.assertEqual(
+            [value.time_of_day for value in stored.times],
+            [time(9, 0), time(21, 0)],
+        )
+        self.assertTrue(
+            all(
+                sqlalchemy_inspect(value).was_deleted
+                for value in old_time_rows
+            )
+        )
+        self.assertTrue(
+            all(value not in old_time_rows for value in stored.times)
+        )
+
+    def test_edit_validation_reuses_rules_and_preserves_input(self):
+        self.log_in()
+        schedule = self.add_schedule()
+        token = self.get_csrf_token("/my-medicines")
+        original_updated_at = schedule.updated_at
+        invalid_overrides = (
+            {"dose_amount_text": "0"},
+            {"dose_amount_text": "NaN"},
+            {"dose_unit_text": "mL"},
+            {"intake_timing": "invalid"},
+            {"daily_frequency": "2", "medication_times": ["09:00"]},
+            {"course_days": "0"},
+            {"reported_doses_taken_before_tracking": "-1"},
+        )
+
+        for overrides in invalid_overrides:
+            with self.subTest(overrides=overrides):
+                response = self.post_edit(
+                    schedule,
+                    self.valid_edit_form_data(schedule, **overrides),
+                    token=token,
+                )
+                self.assertEqual(response.status_code, 400)
+
+        preserved_response = self.post_edit(
+            schedule,
+            self.valid_edit_form_data(
+                schedule,
+                dose_amount_text="2.25",
+                course_days="0",
+            ),
+            token=token,
+        )
+        self.assertEqual(preserved_response.status_code, 400)
+        self.assertIn(b'value="2.25"', preserved_response.data)
+        db.session.expire_all()
+        stored = db.session.get(MedicationSchedule, schedule.schedule_id)
+        self.assertEqual(stored.dose_amount_text, "1")
+        self.assertEqual(stored.updated_at, original_updated_at)
+
+    def test_edit_three_times_keeps_five_remaining_occurrences(self):
+        self.log_in()
+        schedule = self.add_schedule(
+            start_date_value=date(2026, 10, 5),
+            tracking_started_at=EDIT_TRACKING_TIME,
+            course_days=3,
+            medication_times=(time(8, 0), time(14, 0), time(20, 0)),
+        )
+        form_data = self.valid_edit_form_data(
+            schedule,
+            daily_frequency="3",
+            medication_times=["09:00", "15:00", "21:00"],
+        )
+        token = self.get_csrf_token("/my-medicines")
+
+        with patch.object(
+            app_module,
+            "utc_now",
+            return_value=FIRST_EDIT_TIME,
+        ) as mocked_utc_now:
+            response = self.post_edit(schedule, form_data, token=token)
+
+        self.assertEqual(mocked_utc_now.call_count, 1)
+        self.assertEqual(response.status_code, 302)
+        db.session.expire_all()
+        stored = db.session.get(MedicationSchedule, schedule.schedule_id)
+        self.assertEqual(stored.accounted_occurrence_count, 4)
+        self.assertEqual(
+            app_module.as_utc(stored.reminder_tracking_started_at),
+            FIRST_EDIT_TIME,
+        )
+        occurrences = generate_future_occurrences(
+            start_date=stored.start_date,
+            course_days=stored.course_days,
+            times=(value.time_of_day for value in stored.times),
+            reported_doses_taken_before_tracking=(
+                stored.reported_doses_taken_before_tracking
+            ),
+            accounted_occurrence_count=(
+                stored.accounted_occurrence_count
+            ),
+            reminder_tracking_started_at=app_module.as_utc(
+                stored.reminder_tracking_started_at
+            ),
+            reference_at=FIRST_EDIT_TIME,
+            timezone_name="Asia/Seoul",
+        )
+        expected = (
+            datetime(2026, 10, 6, 15, 0, tzinfo=ZoneInfo("Asia/Seoul")),
+            datetime(2026, 10, 6, 21, 0, tzinfo=ZoneInfo("Asia/Seoul")),
+            datetime(2026, 10, 7, 9, 0, tzinfo=ZoneInfo("Asia/Seoul")),
+            datetime(2026, 10, 7, 15, 0, tzinfo=ZoneInfo("Asia/Seoul")),
+            datetime(2026, 10, 7, 21, 0, tzinfo=ZoneInfo("Asia/Seoul")),
+        )
+        self.assertEqual(occurrences, expected)
+
+    def test_edit_two_times_keeps_two_remaining_occurrences(self):
+        self.log_in()
+        schedule = self.add_schedule(
+            start_date_value=date(2026, 10, 5),
+            tracking_started_at=EDIT_TRACKING_TIME,
+            course_days=3,
+            medication_times=(time(8, 0), time(14, 0), time(20, 0)),
+        )
+        form_data = self.valid_edit_form_data(
+            schedule,
+            daily_frequency="2",
+            medication_times=["09:00", "21:00"],
+        )
+        token = self.get_csrf_token("/my-medicines")
+
+        with patch.object(
+            app_module,
+            "utc_now",
+            return_value=FIRST_EDIT_TIME,
+        ):
+            response = self.post_edit(schedule, form_data, token=token)
+
+        self.assertEqual(response.status_code, 302)
+        db.session.expire_all()
+        stored = db.session.get(MedicationSchedule, schedule.schedule_id)
+        self.assertEqual(stored.accounted_occurrence_count, 4)
+        occurrences = generate_future_occurrences(
+            start_date=stored.start_date,
+            course_days=stored.course_days,
+            times=(value.time_of_day for value in stored.times),
+            reported_doses_taken_before_tracking=0,
+            accounted_occurrence_count=4,
+            reminder_tracking_started_at=app_module.as_utc(
+                stored.reminder_tracking_started_at
+            ),
+            reference_at=FIRST_EDIT_TIME,
+            timezone_name="Asia/Seoul",
+        )
+        self.assertEqual(
+            occurrences,
+            (
+                datetime(
+                    2026,
+                    10,
+                    6,
+                    21,
+                    0,
+                    tzinfo=ZoneInfo("Asia/Seoul"),
+                ),
+                datetime(
+                    2026,
+                    10,
+                    7,
+                    9,
+                    0,
+                    tzinfo=ZoneInfo("Asia/Seoul"),
+                ),
+            ),
+        )
+
+    def test_repeated_edit_accumulates_only_the_new_segment(self):
+        self.log_in()
+        schedule = self.add_schedule(
+            start_date_value=date(2026, 10, 5),
+            tracking_started_at=EDIT_TRACKING_TIME,
+            course_days=3,
+            medication_times=(time(8, 0), time(14, 0), time(20, 0)),
+        )
+        first_form = self.valid_edit_form_data(
+            schedule,
+            daily_frequency="3",
+            medication_times=["09:00", "15:00", "21:00"],
+        )
+        token = self.get_csrf_token("/my-medicines")
+
+        with patch.object(
+            app_module,
+            "utc_now",
+            return_value=FIRST_EDIT_TIME,
+        ):
+            first_response = self.post_edit(
+                schedule,
+                first_form,
+                token=token,
+            )
+
+        self.assertEqual(first_response.status_code, 302)
+        db.session.expire_all()
+        stored = db.session.get(MedicationSchedule, schedule.schedule_id)
+        self.assertEqual(stored.accounted_occurrence_count, 4)
+        second_form = self.valid_edit_form_data(stored)
+        token = self.get_csrf_token("/my-medicines")
+
+        with patch.object(
+            app_module,
+            "utc_now",
+            return_value=SECOND_EDIT_TIME,
+        ):
+            second_response = self.post_edit(
+                stored,
+                second_form,
+                token=token,
+            )
+
+        self.assertEqual(second_response.status_code, 302)
+        db.session.expire_all()
+        stored = db.session.get(MedicationSchedule, schedule.schedule_id)
+        self.assertEqual(stored.accounted_occurrence_count, 6)
+        self.assertEqual(
+            app_module.as_utc(stored.reminder_tracking_started_at),
+            SECOND_EDIT_TIME,
+        )
+
+    def test_edit_rejects_plan_smaller_than_already_accounted(self):
+        self.log_in()
+        schedule = self.add_schedule(
+            course_days=3,
+            medication_times=(time(8, 0), time(14, 0), time(20, 0)),
+            accounted=4,
+        )
+        old_updated_at = schedule.updated_at
+        old_times = [value.time_of_day for value in schedule.times]
+        form_data = self.valid_edit_form_data(
+            schedule,
+            dose_amount_text="2.25",
+            daily_frequency="1",
+            medication_times=["09:00"],
+            course_days="3",
+        )
+
+        response = self.post_edit(schedule, form_data)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(b'value="2.25"', response.data)
+        db.session.expire_all()
+        stored = db.session.get(MedicationSchedule, schedule.schedule_id)
+        self.assertEqual(stored.updated_at, old_updated_at)
+        self.assertEqual(stored.accounted_occurrence_count, 4)
+        self.assertEqual(
+            [value.time_of_day for value in stored.times],
+            old_times,
+        )
+
+    def test_edit_equal_plan_completes_schedule(self):
+        self.log_in()
+        schedule = self.add_schedule(
+            course_days=3,
+            medication_times=(time(8, 0), time(14, 0), time(20, 0)),
+            accounted=4,
+        )
+        form_data = self.valid_edit_form_data(
+            schedule,
+            daily_frequency="2",
+            medication_times=["09:00", "21:00"],
+            course_days="2",
+        )
+
+        response = self.post_edit(schedule, form_data)
+
+        self.assertEqual(response.status_code, 302)
+        db.session.expire_all()
+        stored = db.session.get(MedicationSchedule, schedule.schedule_id)
+        self.assertFalse(stored.is_active)
+        self.assertEqual(stored.accounted_occurrence_count, 4)
+
+    def test_edit_allows_reported_count_corrections(self):
+        self.log_in()
+        schedule = self.add_schedule(reported=1)
+        increase_form = self.valid_edit_form_data(
+            schedule,
+            reported_doses_taken_before_tracking="2",
+        )
+        increase_response = self.post_edit(schedule, increase_form)
+        self.assertEqual(increase_response.status_code, 302)
+
+        db.session.expire_all()
+        stored = db.session.get(MedicationSchedule, schedule.schedule_id)
+        self.assertEqual(stored.reported_doses_taken_before_tracking, 2)
+        decrease_form = self.valid_edit_form_data(
+            stored,
+            reported_doses_taken_before_tracking="0",
+        )
+        decrease_response = self.post_edit(stored, decrease_form)
+        self.assertEqual(decrease_response.status_code, 302)
+        db.session.expire_all()
+        stored = db.session.get(MedicationSchedule, schedule.schedule_id)
+        self.assertEqual(stored.reported_doses_taken_before_tracking, 0)
+
+    def test_edit_accepts_past_today_and_future_start_dates(self):
+        self.log_in()
+        schedule = self.add_schedule(
+            start_date_value=date(2026, 10, 6),
+            course_days=10,
+            medication_times=(time(23, 59),),
+        )
+        start_dates = (
+            date(2020, 1, 1),
+            date(2026, 10, 6),
+            date(2099, 1, 1),
+        )
+
+        for index, start_date_value in enumerate(start_dates):
+            with self.subTest(start_date=start_date_value):
+                db.session.expire_all()
+                stored = db.session.get(
+                    MedicationSchedule,
+                    schedule.schedule_id,
+                )
+                form_data = self.valid_edit_form_data(
+                    stored,
+                    start_date=start_date_value.isoformat(),
+                )
+                token = self.get_csrf_token("/my-medicines")
+                edit_time = FIRST_EDIT_TIME + timedelta(minutes=index)
+
+                with patch.object(
+                    app_module,
+                    "utc_now",
+                    return_value=edit_time,
+                ):
+                    response = self.post_edit(
+                        stored,
+                        form_data,
+                        token=token,
+                    )
+
+                self.assertEqual(response.status_code, 302)
+                db.session.expire_all()
+                stored = db.session.get(
+                    MedicationSchedule,
+                    schedule.schedule_id,
+                )
+                self.assertEqual(stored.start_date, start_date_value)
+
+    def test_atomic_claim_rejects_changed_database_version(self):
+        schedule = self.add_schedule()
+        old_updated_at = schedule.updated_at
+        newer_updated_at = (
+            app_module.as_utc(old_updated_at) + timedelta(seconds=1)
+        )
+        schedule.updated_at = newer_updated_at
+        db.session.commit()
+
+        claimed = app_module.claim_medication_schedule_edit(
+            schedule,
+            old_updated_at=old_updated_at,
+            edit_time=FIRST_EDIT_TIME,
+        )
+
+        self.assertFalse(claimed)
+        db.session.rollback()
+        db.session.expire_all()
+        stored = db.session.get(MedicationSchedule, schedule.schedule_id)
+        self.assertEqual(
+            app_module.as_utc(stored.updated_at),
+            newer_updated_at,
+        )
+
+    def test_stale_edit_token_preserves_the_newer_change(self):
+        self.log_in()
+        schedule = self.add_schedule(
+            medication_times=(time(9, 0), time(21, 0)),
+        )
+        stale_form = self.valid_edit_form_data(
+            schedule,
+            dose_amount_text="2.25",
+        )
+        schedule.dose_amount_text = "1.5"
+        schedule.updated_at = app_module.as_utc(schedule.updated_at) + timedelta(
+            seconds=1
+        )
+        db.session.commit()
+
+        response = self.post_edit(schedule, stale_form)
+
+        self.assertEqual(response.status_code, 302)
+        db.session.expire_all()
+        stored = db.session.get(MedicationSchedule, schedule.schedule_id)
+        self.assertEqual(stored.dose_amount_text, "1.5")
+        self.assertEqual(
+            [value.time_of_day for value in stored.times],
+            [time(9, 0), time(21, 0)],
+        )
+
+    def test_atomic_claim_conflict_preserves_schedule(self):
+        self.log_in()
+        schedule = self.add_schedule()
+        old_updated_at = schedule.updated_at
+        form_data = self.valid_edit_form_data(
+            schedule,
+            dose_amount_text="2.25",
+        )
+
+        with patch.object(
+            app_module,
+            "claim_medication_schedule_edit",
+            return_value=False,
+        ):
+            response = self.post_edit(schedule, form_data)
+
+        self.assertEqual(response.status_code, 302)
+        db.session.expire_all()
+        stored = db.session.get(MedicationSchedule, schedule.schedule_id)
+        self.assertEqual(stored.dose_amount_text, "1")
+        self.assertEqual(stored.updated_at, old_updated_at)
+
+    def test_edit_time_replacement_failure_rolls_back_everything(self):
+        self.log_in()
+        schedule = self.add_schedule(
+            medication_times=(time(8, 0), time(20, 0)),
+            accounted=1,
+        )
+        schedule_id = schedule.schedule_id
+        old_updated_at = schedule.updated_at
+        old_tracking_started_at = schedule.reminder_tracking_started_at
+        old_time_rows = [
+            (value.medication_time_id, value.time_of_day)
+            for value in schedule.times
+        ]
+        form_data = self.valid_edit_form_data(
+            schedule,
+            daily_frequency="2",
+            medication_times=["09:00", "21:00"],
+        )
+
+        with patch.object(
+            db.session,
+            "flush",
+            side_effect=SQLAlchemyError("forced time replacement failure"),
+        ):
+            response = self.post_edit(schedule, form_data)
+
+        self.assertEqual(response.status_code, 302)
+        db.session.expire_all()
+        stored = db.session.get(MedicationSchedule, schedule_id)
+        self.assertEqual(stored.accounted_occurrence_count, 1)
+        self.assertEqual(stored.updated_at, old_updated_at)
+        self.assertEqual(
+            stored.reminder_tracking_started_at,
+            old_tracking_started_at,
+        )
+        self.assertEqual(
+            [
+                (value.medication_time_id, value.time_of_day)
+                for value in stored.times
+            ],
+            old_time_rows,
+        )
+
+    def test_my_medicines_marks_expired_and_calculation_error_states(self):
+        self.log_in()
+        self.add_schedule(
+            start_date_value=date(2020, 1, 1),
+            tracking_started_at=datetime(2020, 1, 1, tzinfo=UTC),
+            course_days=1,
+            medication_times=(time(8, 0),),
+        )
+        completed_response = self.client.get("/my-medicines")
+        self.assertEqual(completed_response.status_code, 200)
+        self.assertIn("복용 완료".encode(), completed_response.data)
+        self.assertNotIn(
+            "복용 설정 수정".encode(),
+            completed_response.data,
+        )
+
+        self.user.timezone = "Invalid/Timezone"
+        db.session.commit()
+        error_response = self.client.get("/my-medicines")
+        self.assertEqual(error_response.status_code, 200)
+        self.assertIn(
+            "복용 설정 확인 필요".encode(),
+            error_response.data,
+        )
+
     def test_my_medicines_shows_create_link_or_configured_state(self):
         self.log_in()
         response = self.client.get("/my-medicines")
@@ -704,7 +1426,7 @@ class MedicationScheduleRouteTest(unittest.TestCase):
         self.add_schedule()
         response = self.client.get("/my-medicines")
         self.assertEqual(response.status_code, 200)
-        self.assertIn("복용 설정됨".encode(), response.data)
+        self.assertIn("복용 설정 수정".encode(), response.data)
 
     def test_existing_routes_and_my_medicine_mutations_still_work(self):
         self.assertEqual(self.client.get("/").status_code, 200)

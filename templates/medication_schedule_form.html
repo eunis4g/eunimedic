@@ -3,12 +3,12 @@
 
 <head>
     <meta charset="UTF-8">
-    <title>복용 설정</title>
+    <title>{{ heading }}</title>
 </head>
 
 <body>
 
-    <h1>복용 설정</h1>
+    <h1>{{ heading }}</h1>
     <p>{{ user_medicine.medicine.item_name }}</p>
 
     {% with messages = get_flashed_messages(with_categories=true) %}
@@ -34,12 +34,19 @@
         </section>
     {% endif %}
 
-    <form method="POST">
+    <form method="POST" action="{{ form_action }}">
         <input
             type="hidden"
             name="csrf_token"
             value="{{ csrf_token() }}"
         >
+        {% if mode == 'edit' %}
+            <input
+                type="hidden"
+                name="schedule_version"
+                value="{{ schedule_version }}"
+            >
+        {% endif %}
 
         <fieldset>
             <legend>복용량</legend>
@@ -166,7 +173,7 @@
 
         <p>
             <label for="reported_doses_taken_before_tracking">
-                알림 설정 전에 이미 복용한 횟수
+                처음 알림 추적 시작 전 이미 복용한 횟수
             </label>
             <input
                 id="reported_doses_taken_before_tracking"
@@ -179,12 +186,13 @@
             >
         </p>
         <p>
-            알림 설정 전에 이미 복용한 횟수가 있다면 입력하세요.
+            처음 알림 추적을 시작하기 전에 이미 복용한 횟수를
+            입력하세요.
         </p>
 
         <p id="planned-total" aria-live="polite"></p>
 
-        <button type="submit">저장</button>
+        <button type="submit">{{ submit_label }}</button>
     </form>
 
     <p>
