@@ -1063,9 +1063,17 @@ def my_medicines():
     ).all()
     schedule_states = {
         user_medicine.user_medicine_id: {
-            "status": "none",
+            "status": (
+                "pending"
+                if user_medicine.schedule_setup_pending
+                else "none"
+            ),
             "schedule_id": None,
         }
+        for user_medicine in user_medicines
+    }
+    user_medicines_by_id = {
+        user_medicine.user_medicine_id: user_medicine
         for user_medicine in user_medicines
     }
     user_medicine_ids = list(schedule_states)
@@ -1082,6 +1090,13 @@ def my_medicines():
         reference_at = utc_now()
 
         for schedule in active_schedules:
+            user_medicine = user_medicines_by_id[
+                schedule.user_medicine_id
+            ]
+
+            if user_medicine.schedule_setup_pending:
+                continue
+
             try:
                 summary = calculate_stored_schedule_summary(
                     schedule,
@@ -1125,7 +1140,10 @@ def new_medication_schedule(user_medicine_id):
     operation_time = utc_now()
     active_schedule = get_active_medication_schedule(user_medicine_id)
 
-    if active_schedule is not None:
+    if (
+        active_schedule is not None
+        and not user_medicine.schedule_setup_pending
+    ):
         try:
             active_summary = calculate_stored_schedule_summary(
                 active_schedule,
@@ -1268,6 +1286,7 @@ def new_medication_schedule(user_medicine_id):
         for medication_time in validated_data["medication_times"]
     )
     db.session.add(schedule)
+    user_medicine.schedule_setup_pending = False
 
     try:
         db.session.flush()
@@ -1646,10 +1665,12 @@ def register_my_medicine(item_seq):
             medicine_item_seq=item_seq,
             registration_source="search",
             is_active=True,
+            schedule_setup_pending=True,
         )
         db.session.add(user_medicine)
     else:
         user_medicine.is_active = True
+        user_medicine.schedule_setup_pending = True
         user_medicine.registration_source = "search"
 
     try:
@@ -1688,6 +1709,7 @@ def deactivate_my_medicine(user_medicine_id):
         return redirect(url_for("my_medicines"))
 
     user_medicine.is_active = False
+    user_medicine.schedule_setup_pending = False
 
     try:
         db.session.commit()
