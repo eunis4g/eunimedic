@@ -585,7 +585,6 @@ def calculate_stored_schedule_summary(
 
 
 def get_plan_schedule_addition_status(
-    user_medicine,
     active_schedule,
     *,
     plan_id,
@@ -598,12 +597,6 @@ def get_plan_schedule_addition_status(
 
     if active_schedule.plan_id == plan_id:
         return "already_added"
-
-    if (
-        active_schedule.plan_id is None
-        and user_medicine.schedule_setup_pending
-    ):
-        return "available"
 
     try:
         summary = calculate_stored_schedule_summary(
@@ -1727,7 +1720,6 @@ def select_medication_for_plan(plan_id):
             None,
         )
         status = get_plan_schedule_addition_status(
-            user_medicine,
             active_schedule,
             plan_id=plan.plan_id,
             reference_at=view_time,
@@ -1768,7 +1760,6 @@ def add_medication_to_plan(plan_id, user_medicine_id):
         user_medicine.user_medicine_id
     )
     addition_status = get_plan_schedule_addition_status(
-        user_medicine,
         active_schedule,
         plan_id=plan.plan_id,
         reference_at=operation_time,
@@ -2220,125 +2211,34 @@ def delete_medication_plan_time(plan_id, plan_time_id):
 @app.route("/my-medicines", methods=["GET"])
 @login_required
 def my_medicines():
-    view_time = utc_now()
     user_medicines = db.session.scalars(
         db.select(UserMedicine)
         .options(
             selectinload(UserMedicine.medicine),
-            selectinload(UserMedicine.schedules).selectinload(
-                MedicationSchedule.times
+            selectinload(UserMedicine.schedules).load_only(
+                MedicationSchedule.schedule_id
             ),
         )
-        .where(UserMedicine.user_id == current_user.user_id)
+        .where(
+            UserMedicine.user_id == current_user.user_id,
+            UserMedicine.is_active.is_(True),
+        )
         .order_by(
             UserMedicine.registered_at.desc(),
             UserMedicine.user_medicine_id.desc(),
         )
     ).all()
-    current_medications = []
-    past_medications = []
-
-    for user_medicine in user_medicines:
-        schedules = tuple(user_medicine.schedules)
-        active_schedule = next(
-            (schedule for schedule in schedules if schedule.is_active),
-            None,
-        )
-        has_history = bool(schedules)
-
-        if user_medicine.is_active:
-            if (
-                active_schedule is not None
-                and active_schedule.plan_id is not None
-            ):
-                current_medications.append(
-                    {
-                        "user_medicine": user_medicine,
-                        "status": "plan_bound",
-                        "schedule_id": active_schedule.schedule_id,
-                        "has_history": has_history,
-                    }
-                )
-                continue
-
-            if user_medicine.schedule_setup_pending:
-                current_medications.append(
-                    {
-                        "user_medicine": user_medicine,
-                        "status": "pending",
-                        "schedule_id": None,
-                        "has_history": has_history,
-                    }
-                )
-                continue
-
-            if active_schedule is not None:
-                try:
-                    summary = calculate_stored_schedule_summary(
-                        active_schedule,
-                        reference_at=view_time,
-                        timezone_name=current_user.timezone,
-                    )
-                except MedicationScheduleCalculationError:
-                    current_medications.append(
-                        {
-                            "user_medicine": user_medicine,
-                            "status": "error",
-                            "schedule_id": active_schedule.schedule_id,
-                            "has_history": has_history,
-                        }
-                    )
-                    continue
-
-                if summary.remaining > 0:
-                    current_medications.append(
-                        {
-                            "user_medicine": user_medicine,
-                            "status": "active",
-                            "schedule_id": active_schedule.schedule_id,
-                            "has_history": has_history,
-                        }
-                    )
-                    continue
-
-            if not schedules:
-                current_medications.append(
-                    {
-                        "user_medicine": user_medicine,
-                        "status": "pending",
-                        "schedule_id": None,
-                        "has_history": False,
-                    }
-                )
-                continue
-
-        if schedules:
-            latest_schedule = max(
-                schedules,
-                key=lambda schedule: (
-                    as_utc(schedule.created_at),
-                    schedule.schedule_id,
-                ),
-            )
-            past_medications.append(
-                {
-                    "user_medicine": user_medicine,
-                    "latest_schedule": latest_schedule,
-                }
-            )
-
-    past_medications.sort(
-        key=lambda item: (
-            as_utc(item["latest_schedule"].created_at),
-            item["user_medicine"].user_medicine_id,
-        ),
-        reverse=True,
-    )
+    medication_entries = [
+        {
+            "user_medicine": user_medicine,
+            "has_history": bool(user_medicine.schedules),
+        }
+        for user_medicine in user_medicines
+    ]
 
     return render_template(
         "my_medicines.html",
-        current_medications=current_medications,
-        past_medications=past_medications,
+        medication_entries=medication_entries,
     )
 
 
@@ -3861,7 +3761,7 @@ def register_my_medicine(item_seq):
     )
 
     if user_medicine is not None and user_medicine.is_active:
-        flash("이미 내 복용약에 등록된 약입니다.", "error")
+        flash("이미 내 복용약에 등록되어 있습니다.", "info")
         return redirect(url_for("my_medicines"))
 
     medicine = db.session.get(Medicine, item_seq)
@@ -3893,12 +3793,12 @@ def register_my_medicine(item_seq):
             medicine_item_seq=item_seq,
             registration_source="search",
             is_active=True,
-            schedule_setup_pending=True,
+            schedule_setup_pending=False,
         )
         db.session.add(user_medicine)
     else:
         user_medicine.is_active = True
-        user_medicine.schedule_setup_pending = True
+        user_medicine.schedule_setup_pending = False
         user_medicine.registration_source = "search"
 
     try:
@@ -3911,7 +3811,7 @@ def register_my_medicine(item_seq):
         )
         return redirect(url_for("my_medicines"))
 
-    flash("내 복용약에 등록했습니다.", "success")
+    flash("내 복용약에 추가했습니다.", "success")
     return redirect(url_for("my_medicines"))
 
 

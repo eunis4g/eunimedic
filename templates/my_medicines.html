@@ -22,78 +22,49 @@
         {% endif %}
     {% endwith %}
 
-    <p>
-        <a href="{{ url_for('search_my_medicine') }}">복용약 등록</a>
-    </p>
+    <nav aria-label="복용약 화면 이동">
+        <p>
+            <a href="{{ url_for('search_my_medicine') }}">
+                약 검색에서 추가
+            </a>
+        </p>
+        <p>
+            <a href="{{ url_for('my_medication_plan') }}">
+                내 복용약 일정
+            </a>
+        </p>
+    </nav>
 
-    <p>
-        <a href="{{ url_for('my_medication_plan') }}">내 복용약 일정</a>
-    </p>
+    <section aria-labelledby="my-medicines-heading">
+        <h2 id="my-medicines-heading">등록한 약</h2>
 
-    <section aria-labelledby="current-medications-heading">
-        <h2 id="current-medications-heading">내 복용약</h2>
-
-        {% if current_medications %}
-            {% for item in current_medications %}
-                {% set user_medicine = item.user_medicine %}
+        {% if medication_entries %}
+            {% for entry in medication_entries %}
+                {% set user_medicine = entry.user_medicine %}
                 <article data-user-medicine-id="{{ user_medicine.user_medicine_id }}">
-                    <h3>
-                        <a href="{{ url_for(
-                            'medicine_detail',
-                            item_seq=user_medicine.medicine.item_seq
-                        ) }}">
-                            {{ user_medicine.medicine.item_name }}
-                        </a>
-                    </h3>
+                    <h3>{{ user_medicine.medicine.item_name }}</h3>
                     <p>
                         제조사:
                         {{ user_medicine.medicine.entp_name or '제조사 정보 없음' }}
                     </p>
+                    <p>
+                        <a href="{{ url_for(
+                            'medicine_detail',
+                            item_seq=user_medicine.medicine.item_seq
+                        ) }}">약 상세 보기</a>
+                    </p>
 
-                    {% if item.status == 'plan_bound' %}
-                        <p>복용 중</p>
-                        <p>
-                            <a href="{{ url_for('my_medication_plan') }}">
-                                내 복용약 일정에서 관리
-                            </a>
-                        </p>
-                    {% elif item.status == 'pending' %}
-                        <p>복용 설정 필요</p>
-                        <p>
-                            <a href="{{ url_for(
-                                'new_medication_schedule',
-                                user_medicine_id=(
-                                    user_medicine.user_medicine_id
-                                )
-                            ) }}">
-                                복용 설정
-                            </a>
-                        </p>
-                    {% elif item.status == 'active' %}
-                        <p>복용 중</p>
-                        <p>
-                            <a href="{{ url_for(
-                                'edit_medication_schedule',
-                                schedule_id=item.schedule_id
-                            ) }}">
-                                복용 설정 수정
-                            </a>
-                        </p>
-                    {% else %}
-                        <p>복용 설정 확인 필요</p>
-                    {% endif %}
-
-                    {% if item.has_history %}
+                    {% if entry.has_history %}
                         <p>
                             <a href="{{ url_for(
                                 'medication_history',
                                 user_medicine_id=(
                                     user_medicine.user_medicine_id
                                 )
-                            ) }}">
-                                복용 이력
-                            </a>
+                            ) }}">복용 이력</a>
                         </p>
+                    {% else %}
+                        <p>복용 이력 없음</p>
                     {% endif %}
 
                     <form
@@ -114,69 +85,7 @@
                 </article>
             {% endfor %}
         {% else %}
-            <p>현재 복용 중이거나 설정이 필요한 약이 없습니다.</p>
-        {% endif %}
-    </section>
-
-    <section aria-labelledby="past-medications-heading">
-        <h2 id="past-medications-heading">과거에 복용했던 약</h2>
-
-        {% if past_medications %}
-            {% for item in past_medications %}
-                {% set user_medicine = item.user_medicine %}
-                <article data-user-medicine-id="{{ user_medicine.user_medicine_id }}">
-                    <h3>
-                        <a href="{{ url_for(
-                            'medicine_detail',
-                            item_seq=user_medicine.medicine.item_seq
-                        ) }}">
-                            {{ user_medicine.medicine.item_name }}
-                        </a>
-                    </h3>
-                    <p>
-                        제조사:
-                        {{ user_medicine.medicine.entp_name or '제조사 정보 없음' }}
-                    </p>
-                    <p>
-                        <a href="{{ url_for(
-                            'medication_history',
-                            user_medicine_id=user_medicine.user_medicine_id
-                        ) }}">
-                            복용 이력
-                        </a>
-                    </p>
-                    <p>
-                        <a href="{{ url_for(
-                            'restart_medication_schedule',
-                            schedule_id=item.latest_schedule.schedule_id
-                        ) }}">
-                            다시 복용하기
-                        </a>
-                    </p>
-
-                    {% if user_medicine.is_active %}
-                        <form
-                            action="{{ url_for(
-                                'deactivate_my_medicine',
-                                user_medicine_id=(
-                                    user_medicine.user_medicine_id
-                                )
-                            ) }}"
-                            method="POST"
-                            onsubmit="return confirm('내 복용약에서 제거하시겠습니까?');"
-                        >
-                            <input
-                                type="hidden"
-                                name="csrf_token"
-                                value="{{ csrf_token() }}"
-                            >
-                            <button type="submit">내 복용약에서 제거</button>
-                        </form>
-                    {% endif %}
-                </article>
-            {% endfor %}
-        {% else %}
-            <p>과거 복용 이력이 없습니다.</p>
+            <p>내 복용약에 등록된 약이 없습니다.</p>
         {% endif %}
     </section>
 

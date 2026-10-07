@@ -1113,7 +1113,7 @@ class MedicationPlanRouteTest(unittest.TestCase):
         self.assertIn(pending.medicine.item_name.encode(), response.data)
         self.assertIn(available.medicine.item_name.encode(), response.data)
         self.assertNotIn(inactive.medicine.item_name.encode(), response.data)
-        self.assertEqual(response.data.count("일정에 추가</a>".encode()), 2)
+        self.assertEqual(response.data.count("일정에 추가</a>".encode()), 1)
 
         schedule_count = db.session.query(MedicationSchedule).count()
         direct_response = self.client.post(
@@ -1552,22 +1552,29 @@ class MedicationPlanRouteTest(unittest.TestCase):
         self.assertIsNotNone(db.session.get(MedicationTime, old_snapshot_id))
         self.assertEqual(db.session.query(MedicationSchedule).count(), 2)
 
-    def test_pending_legacy_schedule_is_closed_even_when_future(self):
+    def test_pending_future_legacy_schedule_blocks_plan_addition(self):
         self.log_in()
         plan = self.add_plan()
         plan_time = self.add_plan_time(plan, time(20, 0))
+        token = self.get_csrf_token()
+        form_data = self.valid_plan_medicine_form(plan, (plan_time,))
         old_schedule = self.add_existing_schedule(
             self.user_medicine,
             pending=True,
         )
 
-        response = self.post_plan_medicine(plan, (plan_time,))
+        response = self.post_plan_medicine(
+            plan,
+            (plan_time,),
+            form_data=form_data,
+            token=token,
+        )
 
         self.assertEqual(response.status_code, 302)
         db.session.refresh(old_schedule)
-        self.assertFalse(old_schedule.is_active)
-        self.assertIsNotNone(old_schedule.closed_at)
-        self.assertEqual(db.session.query(MedicationSchedule).count(), 2)
+        self.assertTrue(old_schedule.is_active)
+        self.assertIsNone(old_schedule.closed_at)
+        self.assertEqual(db.session.query(MedicationSchedule).count(), 1)
 
     def test_running_plan_bound_schedule_blocks_even_when_pending(self):
         self.log_in()
@@ -1664,6 +1671,10 @@ class MedicationPlanRouteTest(unittest.TestCase):
         old_schedule = self.add_existing_schedule(
             self.user_medicine,
             pending=True,
+            start_date_value=date(2020, 1, 1),
+            tracking_started_at=datetime(2020, 1, 1, tzinfo=UTC),
+            course_days=1,
+            medication_times=(time(8, 0),),
         )
         old_updated_at = plan.updated_at
         old_time_id = old_schedule.times[0].medication_time_id
