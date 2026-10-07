@@ -212,6 +212,58 @@ class MedicationPlanRouteTest(unittest.TestCase):
             },
         )
 
+    def move_plan_time_url(self, plan, plan_time):
+        return (
+            f"/medication-plans/{plan.plan_id}/times/"
+            f"{plan_time.plan_time_id}/move"
+        )
+
+    def post_move_plan_time(
+        self,
+        plan,
+        source_plan_time,
+        target_time,
+        schedules,
+        *,
+        plan_version=None,
+        schedule_versions=None,
+        token=None,
+    ):
+        url = self.move_plan_time_url(plan, source_plan_time)
+
+        if token is None:
+            token = self.get_csrf_token(url)
+        if plan_version is None:
+            plan_version = self.plan_version(plan)
+        if schedule_versions is None:
+            schedule_versions = {
+                schedule.schedule_id: (
+                    app_module.serialize_schedule_version(
+                        schedule.updated_at
+                    )
+                )
+                for schedule in schedules
+            }
+
+        data = {
+            "csrf_token": token,
+            "plan_version": plan_version,
+            "target_time": target_time,
+            "schedule_id": [
+                str(schedule.schedule_id)
+                if isinstance(schedule, MedicationSchedule)
+                else str(schedule)
+                for schedule in schedules
+            ],
+        }
+        data.update(
+            {
+                f"schedule_version_{schedule_id}": version
+                for schedule_id, version in schedule_versions.items()
+            }
+        )
+        return self.client.post(url, data=data)
+
     def add_linked_schedule(self, plan, plan_time, *, active):
         schedule = MedicationSchedule(
             user_medicine_id=self.user_medicine_id,
@@ -904,6 +956,825 @@ class MedicationPlanRouteTest(unittest.TestCase):
             stored_time.plan_time_id,
         )
         self.assertEqual(before, after)
+
+    def test_move_plan_time_requires_owned_active_plan_and_matching_time(self):
+        plan = self.add_plan()
+        source = self.add_plan_time(plan, time(8, 0))
+        self.add_existing_schedule(
+            self.user_medicine,
+            plan=plan,
+            plan_times=(source,),
+            medication_times=(time(8, 0),),
+        )
+        other_plan = self.add_plan(user_id=self.other_user_id)
+        other_time = self.add_plan_time(other_plan, time(9, 0))
+
+        anonymous_response = self.client.get(
+            self.move_plan_time_url(plan, source)
+        )
+        self.assertEqual(anonymous_response.status_code, 302)
+
+        self.log_in()
+        csrf_response = self.client.post(
+            self.move_plan_time_url(plan, source),
+            data={
+                "plan_version": self.plan_version(plan),
+                "target_time": "09:00",
+            },
+        )
+        self.assertEqual(csrf_response.status_code, 400)
+        self.assertEqual(
+            self.client.get(
+                self.move_plan_time_url(other_plan, other_time)
+            ).status_code,
+            404,
+        )
+        self.assertEqual(
+            self.client.get(
+                self.move_plan_time_url(plan, other_time)
+            ).status_code,
+            404,
+        )
+
+        plan.is_active = False
+        db.session.commit()
+        self.assertEqual(
+            self.client.get(
+                self.move_plan_time_url(plan, source)
+            ).status_code,
+            404,
+        )
+
+    def test_move_plan_time_get_filters_candidates_and_is_read_only(self):
+        self.log_in()
+        plan = self.add_plan()
+        source = self.add_plan_time(plan, time(8, 0))
+        active = self.add_existing_schedule(
+            self.user_medicine,
+            plan=plan,
+            plan_times=(source,),
+            medication_times=(time(8, 0),),
+        )
+        inactive_user_medicine = self.add_user_medicine("INACTIVE")
+        inactive = self.add_existing_schedule(
+            inactive_user_medicine,
+            plan=plan,
+            plan_times=(source,),
+            active=False,
+            medication_times=(time(8, 0),),
+        )
+        legacy_user_medicine = self.add_user_medicine("LEGACY")
+        legacy = self.add_existing_schedule(
+            legacy_user_medicine,
+            medication_times=(time(8, 0),),
+        )
+        complete_user_medicine = self.add_user_medicine("COMPLETE")
+        complete = self.add_existing_schedule(
+            complete_user_medicine,
+            plan=plan,
+            plan_times=(source,),
+            medication_times=(time(8, 0),),
+            course_days=1,
+            reported=1,
+        )
+        before = (
+            plan.updated_at,
+            db.session.query(MedicationPlanTime).count(),
+            db.session.query(MedicationSchedule).count(),
+        )
+
+        response = self.client.get(
+            self.move_plan_time_url(plan, source)
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"08:00", response.data)
+        self.assertIn(b'name="target_time"', response.data)
+        self.assertIn(b'type="time"', response.data)
+        self.assertIn(b'step="60"', response.data)
+        self.assertIn(b'required', response.data)
+        self.assertIn(
+            f'value="{active.schedule_id}"'.encode(),
+            response.data,
+        )
+        self.assertRegex(
+            response.data,
+            (
+                rb'value="'
+                + str(active.schedule_id).encode()
+                + rb'"[\s\S]*?checked'
+            ),
+        )
+        self.assertNotIn(
+            f'value="{inactive.schedule_id}"'.encode(),
+            response.data,
+        )
+        self.assertNotIn(
+            f'value="{legacy.schedule_id}"'.encode(),
+            response.data,
+        )
+        self.assertNotIn(
+            f'value="{complete.schedule_id}"'.encode(),
+            response.data,
+        )
+        self.assertIn(b'id="select_all_schedules"', response.data)
+        self.assertIn(b'id="clear_all_schedules"', response.data)
+        db.session.refresh(plan)
+        after = (
+            plan.updated_at,
+            db.session.query(MedicationPlanTime).count(),
+            db.session.query(MedicationSchedule).count(),
+        )
+        self.assertEqual(after, before)
+
+    def test_move_plan_time_redirects_when_there_are_no_candidates(self):
+        self.log_in()
+        plan = self.add_plan()
+        source = self.add_plan_time(plan, time(8, 0))
+        before = plan.updated_at
+
+        response = self.client.get(
+            self.move_plan_time_url(plan, source)
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.location, "/my-medication-plan")
+        db.session.refresh(plan)
+        self.assertEqual(plan.updated_at, before)
+        self.assertEqual(
+            db.session.query(MedicationSchedule).count(),
+            0,
+        )
+
+    def test_move_plan_time_rejects_invalid_form_and_unknown_schedule(self):
+        self.log_in()
+        plan = self.add_plan()
+        source = self.add_plan_time(plan, time(8, 0))
+        schedule = self.add_existing_schedule(
+            self.user_medicine,
+            plan=plan,
+            plan_times=(source,),
+            medication_times=(time(8, 0),),
+        )
+        invalid_cases = (
+            ("", [schedule]),
+            ("25:00", [schedule]),
+            ("08:00", [schedule]),
+            ("09:00", []),
+            ("09:00", [schedule, schedule]),
+        )
+
+        for target_time, schedules in invalid_cases:
+            with self.subTest(
+                target_time=target_time,
+                schedule_count=len(schedules),
+            ):
+                response = self.post_move_plan_time(
+                    plan,
+                    source,
+                    target_time,
+                    schedules,
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(
+                    db.session.query(MedicationPlanTime).count(),
+                    1,
+                )
+                self.assertEqual(
+                    db.session.query(MedicationSchedule).count(),
+                    1,
+                )
+                db.session.refresh(schedule)
+                self.assertTrue(schedule.is_active)
+
+        response = self.post_move_plan_time(
+            plan,
+            source,
+            "09:00",
+            [999999],
+            schedule_versions={999999: "unknown"},
+        )
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(
+            db.session.query(MedicationPlanTime).count(),
+            1,
+        )
+        self.assertEqual(
+            db.session.query(MedicationSchedule).count(),
+            1,
+        )
+
+    def test_move_plan_time_rejects_schedules_outside_candidate_scope(self):
+        self.log_in()
+        plan = self.add_plan()
+        source = self.add_plan_time(plan, time(8, 0))
+        other_source = self.add_plan_time(plan, time(12, 0))
+        valid = self.add_existing_schedule(
+            self.user_medicine,
+            plan=plan,
+            plan_times=(source,),
+            medication_times=(time(8, 0),),
+        )
+        inactive_user_medicine = self.add_user_medicine("SCOPE-INACTIVE")
+        inactive = self.add_existing_schedule(
+            inactive_user_medicine,
+            plan=plan,
+            plan_times=(source,),
+            active=False,
+            medication_times=(time(8, 0),),
+        )
+        no_source_user_medicine = self.add_user_medicine("SCOPE-NO-SOURCE")
+        no_source = self.add_existing_schedule(
+            no_source_user_medicine,
+            plan=plan,
+            plan_times=(other_source,),
+            medication_times=(time(12, 0),),
+        )
+        other_owner_user_medicine = self.add_user_medicine(
+            "SCOPE-OTHER-OWNER",
+            user=self.other_user,
+        )
+        other_owner = self.add_existing_schedule(
+            other_owner_user_medicine,
+            plan=plan,
+            plan_times=(source,),
+            medication_times=(time(8, 0),),
+        )
+        other_plan = self.add_plan(user_id=self.other_user_id)
+        other_plan_time = self.add_plan_time(other_plan, time(14, 0))
+        other_plan_user_medicine = self.add_user_medicine(
+            "SCOPE-OTHER-PLAN"
+        )
+        other_plan_schedule = self.add_existing_schedule(
+            other_plan_user_medicine,
+            plan=other_plan,
+            plan_times=(other_plan_time,),
+            medication_times=(time(14, 0),),
+        )
+
+        for invalid_schedule in (
+            inactive,
+            no_source,
+            other_owner,
+            other_plan_schedule,
+        ):
+            with self.subTest(schedule_id=invalid_schedule.schedule_id):
+                response = self.post_move_plan_time(
+                    plan,
+                    source,
+                    "09:00",
+                    [invalid_schedule],
+                )
+                self.assertEqual(response.status_code, 404)
+
+        self.assertEqual(
+            db.session.query(MedicationPlanTime).count(),
+            3,
+        )
+        self.assertEqual(
+            db.session.query(MedicationSchedule).count(),
+            5,
+        )
+        db.session.refresh(valid)
+        self.assertTrue(valid.is_active)
+
+    def test_move_plan_time_reuses_target_and_versions_schedule(self):
+        self.log_in()
+        plan = self.add_plan()
+        source = self.add_plan_time(plan, time(15, 0))
+        target = self.add_plan_time(plan, time(20, 0))
+        schedule = self.add_existing_schedule(
+            self.user_medicine,
+            plan=plan,
+            plan_times=(source,),
+            start_date_value=date(2026, 10, 6),
+            tracking_started_at=datetime(2026, 10, 6, 0, 0, tzinfo=UTC),
+            course_days=5,
+            medication_times=(time(15, 0),),
+            reported=1,
+            accounted=2,
+        )
+        old_id = schedule.schedule_id
+        old_plan_updated_at = plan.updated_at
+
+        with patch.object(
+            app_module,
+            "utc_now",
+            return_value=SECOND_ACTION_TIME,
+        ):
+            response = self.post_move_plan_time(
+                plan,
+                source,
+                "20:00",
+                [schedule],
+            )
+
+        self.assertEqual(response.status_code, 302)
+        old_schedule = db.session.get(MedicationSchedule, old_id)
+        successor = db.session.scalar(
+            db.select(MedicationSchedule).where(
+                MedicationSchedule.supersedes_schedule_id == old_id
+            )
+        )
+        self.assertIsNotNone(successor)
+        self.assertFalse(old_schedule.is_active)
+        self.assertEqual(
+            app_module.as_utc(old_schedule.closed_at),
+            SECOND_ACTION_TIME,
+        )
+        self.assertEqual(
+            app_module.as_utc(old_schedule.updated_at),
+            SECOND_ACTION_TIME,
+        )
+        self.assertEqual(old_schedule.accounted_occurrence_count, 2)
+        self.assertEqual(
+            [value.time_of_day for value in old_schedule.times],
+            [time(15, 0)],
+        )
+        self.assertEqual(
+            [link.plan_time_id for link in old_schedule.plan_time_links],
+            [source.plan_time_id],
+        )
+        self.assertTrue(successor.is_active)
+        self.assertIsNone(successor.closed_at)
+        self.assertEqual(successor.supersedes_schedule_id, old_id)
+        self.assertEqual(successor.accounted_occurrence_count, 3)
+        self.assertEqual(
+            app_module.as_utc(successor.reminder_tracking_started_at),
+            SECOND_ACTION_TIME,
+        )
+        self.assertEqual(
+            [value.time_of_day for value in successor.times],
+            [time(20, 0)],
+        )
+        self.assertEqual(
+            [link.plan_time_id for link in successor.plan_time_links],
+            [target.plan_time_id],
+        )
+        self.assertEqual(
+            db.session.query(MedicationPlanTime).count(),
+            2,
+        )
+        self.assertIsNotNone(
+            db.session.get(MedicationPlanTime, source.plan_time_id)
+        )
+        db.session.refresh(plan)
+        self.assertNotEqual(plan.updated_at, old_plan_updated_at)
+        self.assertEqual(
+            app_module.as_utc(plan.updated_at),
+            SECOND_ACTION_TIME,
+        )
+
+    def test_move_plan_time_creates_one_target_for_selected_schedules(self):
+        self.log_in()
+        plan = self.add_plan()
+        source = self.add_plan_time(plan, time(8, 0))
+        second_user_medicine = self.add_user_medicine("MOVE-2")
+        third_user_medicine = self.add_user_medicine("MOVE-3")
+        first = self.add_existing_schedule(
+            self.user_medicine,
+            plan=plan,
+            plan_times=(source,),
+            medication_times=(time(8, 0),),
+        )
+        second = self.add_existing_schedule(
+            second_user_medicine,
+            plan=plan,
+            plan_times=(source,),
+            medication_times=(time(8, 0),),
+        )
+        unselected = self.add_existing_schedule(
+            third_user_medicine,
+            plan=plan,
+            plan_times=(source,),
+            medication_times=(time(8, 0),),
+        )
+
+        with patch.object(
+            app_module,
+            "utc_now",
+            return_value=SECOND_ACTION_TIME,
+        ):
+            response = self.post_move_plan_time(
+                plan,
+                source,
+                "09:30",
+                [first, second],
+            )
+
+        self.assertEqual(response.status_code, 302)
+        targets = db.session.scalars(
+            db.select(MedicationPlanTime).where(
+                MedicationPlanTime.plan_id == plan.plan_id,
+                MedicationPlanTime.time_of_day == time(9, 30),
+            )
+        ).all()
+        self.assertEqual(len(targets), 1)
+        target = targets[0]
+
+        for old_schedule in (first, second):
+            stored_old = db.session.get(
+                MedicationSchedule,
+                old_schedule.schedule_id,
+            )
+            successor = db.session.scalar(
+                db.select(MedicationSchedule).where(
+                    MedicationSchedule.supersedes_schedule_id
+                    == old_schedule.schedule_id
+                )
+            )
+            self.assertFalse(stored_old.is_active)
+            self.assertEqual(
+                [
+                    link.plan_time_id
+                    for link in stored_old.plan_time_links
+                ],
+                [source.plan_time_id],
+            )
+            self.assertIsNotNone(successor)
+            self.assertTrue(successor.is_active)
+            self.assertEqual(
+                [
+                    link.plan_time_id
+                    for link in successor.plan_time_links
+                ],
+                [target.plan_time_id],
+            )
+            self.assertEqual(
+                [value.time_of_day for value in successor.times],
+                [time(9, 30)],
+            )
+
+        db.session.refresh(unselected)
+        self.assertTrue(unselected.is_active)
+        self.assertIsNone(
+            db.session.scalar(
+                db.select(MedicationSchedule).where(
+                    MedicationSchedule.supersedes_schedule_id
+                    == unselected.schedule_id
+                )
+            )
+        )
+        self.assertIsNotNone(
+            db.session.get(MedicationPlanTime, source.plan_time_id)
+        )
+
+    def test_move_plan_time_rejects_target_already_used_by_selection(self):
+        self.log_in()
+        plan = self.add_plan()
+        source = self.add_plan_time(plan, time(8, 0))
+        target = self.add_plan_time(plan, time(20, 0))
+        schedule = self.add_existing_schedule(
+            self.user_medicine,
+            plan=plan,
+            plan_times=(source, target),
+            medication_times=(time(8, 0), time(20, 0)),
+        )
+        before = (plan.updated_at, schedule.updated_at)
+
+        response = self.post_move_plan_time(
+            plan,
+            source,
+            "20:00",
+            [schedule],
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            db.session.query(MedicationSchedule).count(),
+            1,
+        )
+        db.session.refresh(plan)
+        db.session.refresh(schedule)
+        self.assertEqual((plan.updated_at, schedule.updated_at), before)
+        self.assertTrue(schedule.is_active)
+        self.assertEqual(
+            sorted(value.time_of_day for value in schedule.times),
+            [time(8, 0), time(20, 0)],
+        )
+
+    def test_move_plan_time_rejects_effectively_complete_race(self):
+        self.log_in()
+        plan = self.add_plan()
+        source = self.add_plan_time(plan, time(8, 0))
+        movable = self.add_existing_schedule(
+            self.user_medicine,
+            plan=plan,
+            plan_times=(source,),
+            medication_times=(time(8, 0),),
+        )
+        complete_user_medicine = self.add_user_medicine("RACE-COMPLETE")
+        complete = self.add_existing_schedule(
+            complete_user_medicine,
+            plan=plan,
+            plan_times=(source,),
+            medication_times=(time(8, 0),),
+            course_days=1,
+            reported=1,
+        )
+
+        page = self.client.get(self.move_plan_time_url(plan, source))
+        self.assertEqual(page.status_code, 200)
+        self.assertIn(
+            f'value="{movable.schedule_id}"'.encode(),
+            page.data,
+        )
+        self.assertNotIn(
+            f'value="{complete.schedule_id}"'.encode(),
+            page.data,
+        )
+
+        response = self.post_move_plan_time(
+            plan,
+            source,
+            "09:00",
+            [complete],
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            db.session.query(MedicationPlanTime).count(),
+            1,
+        )
+        self.assertEqual(
+            db.session.query(MedicationSchedule).count(),
+            2,
+        )
+        db.session.refresh(movable)
+        db.session.refresh(complete)
+        self.assertTrue(movable.is_active)
+        self.assertTrue(complete.is_active)
+
+    def test_move_plan_time_rolls_back_when_second_schedule_claim_fails(self):
+        self.log_in()
+        plan = self.add_plan()
+        source = self.add_plan_time(plan, time(8, 0))
+        second_user_medicine = self.add_user_medicine("CLAIM-2")
+        first = self.add_existing_schedule(
+            self.user_medicine,
+            plan=plan,
+            plan_times=(source,),
+            medication_times=(time(8, 0),),
+        )
+        second = self.add_existing_schedule(
+            second_user_medicine,
+            plan=plan,
+            plan_times=(source,),
+            medication_times=(time(8, 0),),
+        )
+        old_plan_updated_at = plan.updated_at
+        original_claim = app_module.claim_medication_schedule_edit
+        claim_count = 0
+
+        def fail_second_claim(*args, **kwargs):
+            nonlocal claim_count
+            claim_count += 1
+            if claim_count == 2:
+                return False
+            return original_claim(*args, **kwargs)
+
+        with patch.object(
+            app_module,
+            "claim_medication_schedule_edit",
+            side_effect=fail_second_claim,
+        ), patch.object(
+            app_module,
+            "utc_now",
+            return_value=SECOND_ACTION_TIME,
+        ):
+            response = self.post_move_plan_time(
+                plan,
+                source,
+                "09:00",
+                [first, second],
+            )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(claim_count, 2)
+        db.session.expire_all()
+        stored_plan = db.session.get(MedicationPlan, plan.plan_id)
+        self.assertEqual(stored_plan.updated_at, old_plan_updated_at)
+        self.assertEqual(
+            db.session.query(MedicationPlanTime).count(),
+            1,
+        )
+        self.assertEqual(
+            db.session.query(MedicationSchedule).count(),
+            2,
+        )
+        self.assertTrue(
+            db.session.get(
+                MedicationSchedule,
+                first.schedule_id,
+            ).is_active
+        )
+        self.assertTrue(
+            db.session.get(
+                MedicationSchedule,
+                second.schedule_id,
+            ).is_active
+        )
+
+    def test_move_plan_time_extends_immediate_version_chain(self):
+        self.log_in()
+        plan = self.add_plan()
+        source = self.add_plan_time(plan, time(8, 0))
+        first = self.add_existing_schedule(
+            self.user_medicine,
+            plan=plan,
+            plan_times=(source,),
+            medication_times=(time(8, 0),),
+        )
+
+        with patch.object(
+            app_module,
+            "utc_now",
+            return_value=FIRST_ACTION_TIME + timedelta(seconds=1),
+        ):
+            first_response = self.post_move_plan_time(
+                plan,
+                source,
+                "09:00",
+                [first],
+            )
+        self.assertEqual(first_response.status_code, 302)
+        second = db.session.scalar(
+            db.select(MedicationSchedule).where(
+                MedicationSchedule.supersedes_schedule_id
+                == first.schedule_id
+            )
+        )
+        middle_time = db.session.scalar(
+            db.select(MedicationPlanTime).where(
+                MedicationPlanTime.plan_id == plan.plan_id,
+                MedicationPlanTime.time_of_day == time(9, 0),
+            )
+        )
+
+        with patch.object(
+            app_module,
+            "utc_now",
+            return_value=SECOND_ACTION_TIME,
+        ):
+            second_response = self.post_move_plan_time(
+                plan,
+                middle_time,
+                "10:00",
+                [second],
+            )
+
+        self.assertEqual(second_response.status_code, 302)
+        third = db.session.scalar(
+            db.select(MedicationSchedule).where(
+                MedicationSchedule.supersedes_schedule_id
+                == second.schedule_id
+            )
+        )
+        self.assertIsNotNone(third)
+        self.assertEqual(
+            second.supersedes_schedule_id,
+            first.schedule_id,
+        )
+        self.assertEqual(
+            third.supersedes_schedule_id,
+            second.schedule_id,
+        )
+        self.assertNotEqual(
+            third.supersedes_schedule_id,
+            first.schedule_id,
+        )
+        self.assertEqual(
+            [value.time_of_day for value in third.times],
+            [time(10, 0)],
+        )
+
+    def test_move_plan_time_rejects_stale_plan_and_schedule_versions(self):
+        self.log_in()
+        plan = self.add_plan()
+        source = self.add_plan_time(plan, time(8, 0))
+        schedule = self.add_existing_schedule(
+            self.user_medicine,
+            plan=plan,
+            plan_times=(source,),
+            medication_times=(time(8, 0),),
+        )
+
+        stale_plan_response = self.post_move_plan_time(
+            plan,
+            source,
+            "09:00",
+            [schedule],
+            plan_version="stale",
+        )
+        stale_schedule_response = self.post_move_plan_time(
+            plan,
+            source,
+            "09:00",
+            [schedule],
+            schedule_versions={schedule.schedule_id: "stale"},
+        )
+
+        self.assertEqual(stale_plan_response.status_code, 302)
+        self.assertEqual(stale_schedule_response.status_code, 302)
+        self.assertEqual(
+            db.session.query(MedicationPlanTime).count(),
+            1,
+        )
+        self.assertEqual(
+            db.session.query(MedicationSchedule).count(),
+            1,
+        )
+        db.session.refresh(schedule)
+        self.assertTrue(schedule.is_active)
+        self.assertIsNone(schedule.closed_at)
+
+    def test_move_plan_time_commit_failure_rolls_back_every_stage(self):
+        self.log_in()
+        plan = self.add_plan()
+        source = self.add_plan_time(plan, time(8, 0))
+        schedule = self.add_existing_schedule(
+            self.user_medicine,
+            plan=plan,
+            plan_times=(source,),
+            medication_times=(time(8, 0),),
+        )
+        old_plan_updated_at = plan.updated_at
+        failure = SQLAlchemyError("commit failed")
+
+        with patch.object(
+            app_module,
+            "utc_now",
+            return_value=SECOND_ACTION_TIME,
+        ), patch.object(db.session, "commit", side_effect=failure):
+            response = self.post_move_plan_time(
+                plan,
+                source,
+                "09:00",
+                [schedule],
+            )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            db.session.query(MedicationPlanTime).count(),
+            1,
+        )
+        self.assertEqual(
+            db.session.query(MedicationSchedule).count(),
+            1,
+        )
+        db.session.refresh(plan)
+        db.session.refresh(schedule)
+        self.assertEqual(plan.updated_at, old_plan_updated_at)
+        self.assertTrue(schedule.is_active)
+        self.assertIsNone(schedule.closed_at)
+
+    def test_move_history_survives_later_source_time_deletion(self):
+        self.log_in()
+        plan = self.add_plan()
+        source = self.add_plan_time(plan, time(8, 0))
+        schedule = self.add_existing_schedule(
+            self.user_medicine,
+            plan=plan,
+            plan_times=(source,),
+            medication_times=(time(8, 0),),
+        )
+        old_snapshot_id = schedule.times[0].medication_time_id
+
+        with patch.object(
+            app_module,
+            "utc_now",
+            return_value=SECOND_ACTION_TIME,
+        ):
+            move_response = self.post_move_plan_time(
+                plan,
+                source,
+                "09:00",
+                [schedule],
+            )
+        self.assertEqual(move_response.status_code, 302)
+
+        history_before_delete = self.client.get(
+            f"/my-medicines/{self.user_medicine_id}/history"
+        )
+        self.assertEqual(history_before_delete.status_code, 200)
+        self.assertIn(b"08:00", history_before_delete.data)
+        self.assertIn(b"09:00", history_before_delete.data)
+
+        delete_response = self.post_delete_time(plan, source)
+        self.assertEqual(delete_response.status_code, 302)
+        self.assertIsNone(
+            db.session.get(MedicationPlanTime, source.plan_time_id)
+        )
+        old_snapshot = db.session.get(MedicationTime, old_snapshot_id)
+        self.assertIsNotNone(old_snapshot)
+        self.assertEqual(old_snapshot.time_of_day, time(8, 0))
+
+        history_after_delete = self.client.get(
+            f"/my-medicines/{self.user_medicine_id}/history"
+        )
+        self.assertEqual(history_after_delete.status_code, 200)
+        self.assertIn(b"08:00", history_after_delete.data)
+        self.assertIn(b"09:00", history_after_delete.data)
 
     def test_stale_plan_version_rejects_add_and_delete(self):
         self.log_in()

@@ -101,6 +101,11 @@
                                         </li>
                                     {% endfor %}
                                 </ul>
+                                <a href="{{ url_for(
+                                    'move_medication_plan_time',
+                                    plan_id=plan.plan_id,
+                                    plan_time_id=plan_time.plan_time_id
+                                ) }}">시간 이동</a>
                             {% endif %}
                             <form
                                 method="POST"

@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+    <meta charset="UTF-8">
+    <title>복용 시간 이동</title>
+</head>
+
+<body>
+
+    <h1>
+        {{ source_plan_time.time_of_day.strftime('%H:%M') }} 복용 시간 이동
+    </h1>
+
+    {% if errors %}
+        <section aria-label="입력 오류">
+            <ul>
+                {% for error in errors %}
+                    <li role="alert">{{ error }}</li>
+                {% endfor %}
+            </ul>
+        </section>
+    {% endif %}
+
+    <form method="POST">
+        <input
+            type="hidden"
+            name="csrf_token"
+            value="{{ csrf_token() }}"
+        >
+        <input
+            type="hidden"
+            name="plan_version"
+            value="{{ plan_version }}"
+        >
+
+        <fieldset>
+            <legend>이동할 복용약</legend>
+            <p>시간을 이동할 복용약을 선택하세요.</p>
+
+            <button type="button" id="select_all_schedules">전체 선택</button>
+            <button type="button" id="clear_all_schedules">전체 해제</button>
+
+            <ul>
+                {% for state in candidate_states %}
+                    {% set schedule = state.schedule %}
+                    <li>
+                        <label>
+                            <input
+                                type="checkbox"
+                                name="schedule_id"
+                                value="{{ schedule.schedule_id }}"
+                                {% if schedule.schedule_id in selected_schedule_ids %}
+                                    checked
+                                {% endif %}
+                            >
+                            {{ schedule.user_medicine.medicine.item_name }}
+                        </label>
+                        <input
+                            type="hidden"
+                            name="schedule_version_{{ schedule.schedule_id }}"
+                            value="{{ schedule_versions[schedule.schedule_id] }}"
+                        >
+                    </li>
+                {% endfor %}
+            </ul>
+        </fieldset>
+
+        <p>
+            <label for="target_time">새 복용 시간</label>
+            <input
+                id="target_time"
+                name="target_time"
+                type="time"
+                step="60"
+                value="{{ target_time_value }}"
+                required
+            >
+        </p>
+
+        <button type="submit">선택한 약 이동</button>
+    </form>
+
+    <p><a href="{{ url_for('my_medication_plan') }}">복용 일정으로 돌아가기</a></p>
+
+    <script>
+        (() => {
+            const checkboxes = document.querySelectorAll(
+                'input[name="schedule_id"]'
+            );
+            const setChecked = (checked) => {
+                checkboxes.forEach((checkbox) => {
+                    checkbox.checked = checked;
+                });
+            };
+
+            document.getElementById('select_all_schedules')
+                .addEventListener('click', () => setChecked(true));
+            document.getElementById('clear_all_schedules')
+                .addEventListener('click', () => setChecked(false));
+        })();
+    </script>
+
+</body>
+
+</html>
