@@ -1144,6 +1144,31 @@ class MedicationPlanRouteTest(unittest.TestCase):
             schedule_count,
         )
 
+    def test_plan_selection_ignores_pending_for_available_medicines(self):
+        self.log_in()
+        plan = self.add_plan()
+        self.add_plan_time(plan, time(20, 0))
+        pending = self.add_user_medicine(
+            "AVAILABLE-PENDING",
+            pending=True,
+        )
+        configured = self.add_user_medicine(
+            "AVAILABLE-CONFIGURED",
+            pending=False,
+        )
+
+        response = self.client.get(self.select_medicine_url(plan))
+
+        self.assertEqual(response.status_code, 200)
+        for user_medicine in (pending, configured):
+            self.assertIn(
+                self.plan_medicine_form_url(
+                    plan,
+                    user_medicine,
+                ).encode(),
+                response.data,
+            )
+
     def test_plan_medicine_form_enforces_user_medicine_ownership(self):
         self.log_in()
         plan = self.add_plan()
@@ -1459,7 +1484,7 @@ class MedicationPlanRouteTest(unittest.TestCase):
         self.assertEqual(linked_times, snapshot_times)
         self.assertEqual(len(schedule.plan_time_links), 2)
         db.session.refresh(self.user_medicine)
-        self.assertFalse(self.user_medicine.schedule_setup_pending)
+        self.assertTrue(self.user_medicine.schedule_setup_pending)
         db.session.refresh(plan)
         self.assertEqual(
             app_module.as_utc(plan.updated_at),
@@ -2817,7 +2842,7 @@ class MedicationPlanRouteTest(unittest.TestCase):
         )
         stored_plan = db.session.get(MedicationPlan, plan.plan_id)
         self.assertFalse(stored_user_medicine.is_active)
-        self.assertFalse(stored_user_medicine.schedule_setup_pending)
+        self.assertTrue(stored_user_medicine.schedule_setup_pending)
         self.assertEqual(
             app_module.as_utc(stored_user_medicine.updated_at),
             SECOND_ACTION_TIME,
@@ -3643,7 +3668,7 @@ class MedicationPlanRouteTest(unittest.TestCase):
             self.user_medicine_id,
         )
         self.assertTrue(stored_user_medicine.is_active)
-        self.assertFalse(stored_user_medicine.schedule_setup_pending)
+        self.assertTrue(stored_user_medicine.schedule_setup_pending)
         history = self.client.get(
             f"/my-medicines/{self.user_medicine_id}/history"
         )

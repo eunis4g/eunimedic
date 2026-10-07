@@ -574,7 +574,6 @@ def claim_user_medicine_deactivation(
         )
         .values(
             is_active=False,
-            schedule_setup_pending=False,
             updated_at=remove_time,
         )
         .execution_options(synchronize_session=False)
@@ -668,19 +667,16 @@ def calculate_stored_schedule_last_occurrence(
 
 def get_schedule_history_status(user_medicine, schedule, summary):
 
+    if not schedule.is_active or schedule.closed_at is not None:
+        return "past", "과거 복용 설정"
+
     if summary.remaining == 0:
         return "planned_completed", "예정된 복용 계획 완료"
 
-    if schedule.is_active:
-        if not user_medicine.is_active:
-            return "removed_interrupted", "내 복용약에서 제거되어 중단된 계획"
-
-        if user_medicine.schedule_setup_pending:
-            return "pending_replacement", "새 복용 설정 대기 중인 이전 계획"
-
+    if user_medicine.is_active:
         return "current", "현재 복용 중"
 
-    return "past", "과거 복용 설정"
+    return "removed_interrupted", "내 복용약에서 제거되어 중단된 계획"
 
 
 def build_schedule_history_entry(
@@ -2022,7 +2018,6 @@ def add_medication_to_plan(plan_id, user_medicine_id):
         )
         db.session.flush()
 
-        user_medicine.schedule_setup_pending = False
         user_medicine.updated_at = operation_time
         db.session.commit()
     except IntegrityError:
@@ -2371,10 +2366,10 @@ def new_medication_schedule(user_medicine_id):
     operation_time = utc_now()
     active_schedule = get_active_medication_schedule(user_medicine_id)
 
-    if (
-        active_schedule is not None
-        and not user_medicine.schedule_setup_pending
-    ):
+    active_schedule_updated_at = None
+
+    if active_schedule is not None:
+        active_schedule_updated_at = active_schedule.updated_at
         try:
             active_summary = calculate_stored_schedule_summary(
                 active_schedule,
@@ -2476,19 +2471,6 @@ def new_medication_schedule(user_medicine_id):
             400,
         )
 
-    if active_schedule is not None:
-        active_schedule.is_active = False
-
-        try:
-            db.session.flush()
-        except SQLAlchemyError:
-            db.session.rollback()
-            flash(
-                "복용 설정을 저장하지 못했습니다. 다시 시도해주세요.",
-                "error",
-            )
-            return redirect(url_for("my_medicines"))
-
     schedule = MedicationSchedule(
         user_medicine_id=user_medicine.user_medicine_id,
         intake_timing=validated_data["intake_timing"],
@@ -2516,10 +2498,29 @@ def new_medication_schedule(user_medicine_id):
         MedicationTime(time_of_day=medication_time)
         for medication_time in validated_data["medication_times"]
     )
-    db.session.add(schedule)
-    user_medicine.schedule_setup_pending = False
 
     try:
+        if active_schedule is not None:
+            claimed = claim_medication_schedule_removal(
+                active_schedule,
+                old_updated_at=active_schedule_updated_at,
+                remove_time=operation_time,
+            )
+
+            if not claimed:
+                db.session.rollback()
+                flash(
+                    "복용 설정이 다른 요청에서 변경되었습니다. "
+                    "최신 내용을 확인해주세요.",
+                    "error",
+                )
+                return redirect(url_for("my_medicines"))
+
+            active_schedule.is_active = False
+            active_schedule.closed_at = operation_time
+            active_schedule.updated_at = operation_time
+
+        db.session.add(schedule)
         db.session.flush()
         db.session.commit()
     except (IntegrityError, SQLAlchemyError):
@@ -2867,7 +2868,6 @@ def readd_medication_to_plan(schedule_id):
         )
         db.session.flush()
 
-        user_medicine.schedule_setup_pending = False
         user_medicine.updated_at = readd_time
         db.session.commit()
     except IntegrityError:
@@ -2913,11 +2913,10 @@ def restart_medication_schedule(schedule_id):
         user_medicine.user_medicine_id
     )
 
-    if (
-        user_medicine.is_active
-        and not user_medicine.schedule_setup_pending
-        and active_schedule is not None
-    ):
+    active_schedule_updated_at = None
+
+    if active_schedule is not None:
+        active_schedule_updated_at = active_schedule.updated_at
         try:
             active_summary = calculate_stored_schedule_summary(
                 active_schedule,
@@ -3032,14 +3031,30 @@ def restart_medication_schedule(schedule_id):
             400,
         )
 
-    if active_schedule is not None:
-        active_schedule.is_active = False
-
     try:
+        if active_schedule is not None:
+            claimed = claim_medication_schedule_removal(
+                active_schedule,
+                old_updated_at=active_schedule_updated_at,
+                remove_time=restart_time,
+            )
+
+            if not claimed:
+                db.session.rollback()
+                flash(
+                    "복용 설정이 다른 요청에서 변경되었습니다. "
+                    "최신 내용을 확인해주세요.",
+                    "error",
+                )
+                return redirect(url_for("my_medicines"))
+
+            active_schedule.is_active = False
+            active_schedule.closed_at = restart_time
+            active_schedule.updated_at = restart_time
+
         db.session.flush()
 
         user_medicine.is_active = True
-        user_medicine.schedule_setup_pending = False
         new_schedule = MedicationSchedule(
             user_medicine_id=user_medicine.user_medicine_id,
             intake_timing=validated_data["intake_timing"],
@@ -3820,12 +3835,10 @@ def register_my_medicine(item_seq):
             medicine_item_seq=item_seq,
             registration_source="search",
             is_active=True,
-            schedule_setup_pending=False,
         )
         db.session.add(user_medicine)
     else:
         user_medicine.is_active = True
-        user_medicine.schedule_setup_pending = False
         user_medicine.registration_source = "search"
 
     try:
@@ -3940,7 +3953,6 @@ def deactivate_my_medicine(user_medicine_id):
             schedule.updated_at = remove_time
 
         user_medicine.is_active = False
-        user_medicine.schedule_setup_pending = False
         user_medicine.updated_at = remove_time
         db.session.commit()
     except SQLAlchemyError:
