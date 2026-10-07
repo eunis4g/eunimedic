@@ -663,6 +663,31 @@ class MedicationPlanRouteTest(unittest.TestCase):
             {self.user_id, self.other_user_id},
         )
 
+    def test_plan_time_form_uses_native_minute_picker(self):
+        self.log_in()
+        self.add_plan()
+
+        response = self.client.get("/my-medication-plan")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(
+            '<label for="time_of_day">복용 시간</label>'.encode(),
+            response.data,
+        )
+        input_match = re.search(
+            rb'<input\s+[^>]*\bid="time_of_day"[^>]*>',
+            response.data,
+        )
+        self.assertIsNotNone(input_match)
+        input_tag = input_match.group(0)
+        self.assertIn(b'name="time_of_day"', input_tag)
+        self.assertIn(b'type="time"', input_tag)
+        self.assertIn(b'step="60"', input_tag)
+        self.assertRegex(input_tag, rb'\brequired(?:\s|>)')
+        self.assertNotIn(b'placeholder=', input_tag)
+        self.assertNotIn(b'inputmode=', input_tag)
+        self.assertNotIn(b'pattern=', input_tag)
+
     def test_valid_times_are_local_wall_clock_values_and_sorted(self):
         self.log_in()
         plan = self.add_plan()
