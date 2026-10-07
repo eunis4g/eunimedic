@@ -488,6 +488,21 @@ class MedicationPlanRouteTest(unittest.TestCase):
             data=payload,
         )
 
+    def deactivate_url(self, user_medicine=None):
+        target = user_medicine or self.user_medicine
+        return (
+            f"/my-medicines/{target.user_medicine_id}/deactivate"
+        )
+
+    def post_deactivate(self, user_medicine=None, *, token=None):
+        if token is None:
+            token = self.get_csrf_token("/my-medicines")
+
+        return self.client.post(
+            self.deactivate_url(user_medicine),
+            data={"csrf_token": token},
+        )
+
     def plan_schedule_readd_url(self, schedule):
         return (
             f"/medication-schedules/{schedule.schedule_id}"
@@ -2743,6 +2758,296 @@ class MedicationPlanRouteTest(unittest.TestCase):
             ).encode(),
             selection.data,
         )
+
+    def test_deactivate_closes_plan_schedule_and_allows_plan_time_delete(self):
+        self.log_in()
+        plan = self.add_plan()
+        morning = self.add_plan_time(plan, time(8, 0))
+        evening = self.add_plan_time(plan, time(20, 0))
+        schedule = self.add_existing_schedule(
+            self.user_medicine,
+            plan=plan,
+            plan_times=(morning,),
+            medication_times=(time(8, 0),),
+            pending=True,
+        )
+        other_user_medicine = self.add_user_medicine("DEACTIVATE-OTHER")
+        other_schedule = self.add_existing_schedule(
+            other_user_medicine,
+            plan=plan,
+            plan_times=(evening,),
+            medication_times=(time(20, 0),),
+        )
+        schedule_id = schedule.schedule_id
+        snapshot_id = schedule.times[0].medication_time_id
+        old_other_updated_at = other_schedule.updated_at
+        immutable_values = {
+            column.name: getattr(schedule, column.name)
+            for column in MedicationSchedule.__table__.columns
+            if column.name not in {"is_active", "closed_at", "updated_at"}
+        }
+        link_count = db.session.query(
+            MedicationSchedulePlanTime
+        ).filter_by(schedule_id=schedule_id).count()
+        schedule_count = db.session.query(MedicationSchedule).count()
+
+        blocked_response = self.post_delete_time(plan, morning)
+        self.assertEqual(blocked_response.status_code, 302)
+        self.assertIsNotNone(
+            db.session.get(MedicationPlanTime, morning.plan_time_id)
+        )
+
+        with patch.object(
+            app_module,
+            "utc_now",
+            return_value=SECOND_ACTION_TIME,
+        ):
+            response = self.post_deactivate()
+
+        self.assertEqual(response.status_code, 302)
+        db.session.expire_all()
+        stored_schedule = db.session.get(MedicationSchedule, schedule_id)
+        stored_other = db.session.get(
+            MedicationSchedule,
+            other_schedule.schedule_id,
+        )
+        stored_user_medicine = db.session.get(
+            UserMedicine,
+            self.user_medicine_id,
+        )
+        stored_plan = db.session.get(MedicationPlan, plan.plan_id)
+        self.assertFalse(stored_user_medicine.is_active)
+        self.assertFalse(stored_user_medicine.schedule_setup_pending)
+        self.assertEqual(
+            app_module.as_utc(stored_user_medicine.updated_at),
+            SECOND_ACTION_TIME,
+        )
+        self.assertFalse(stored_schedule.is_active)
+        self.assertEqual(
+            app_module.as_utc(stored_schedule.closed_at),
+            SECOND_ACTION_TIME,
+        )
+        self.assertEqual(
+            app_module.as_utc(stored_schedule.updated_at),
+            SECOND_ACTION_TIME,
+        )
+        self.assertEqual(
+            app_module.as_utc(stored_plan.updated_at),
+            SECOND_ACTION_TIME,
+        )
+        for name, value in immutable_values.items():
+            self.assertEqual(getattr(stored_schedule, name), value)
+        self.assertTrue(stored_other.is_active)
+        self.assertEqual(stored_other.updated_at, old_other_updated_at)
+        self.assertEqual(
+            db.session.query(MedicationSchedule).count(),
+            schedule_count,
+        )
+        self.assertIsNotNone(db.session.get(MedicationTime, snapshot_id))
+        self.assertEqual(
+            db.session.query(MedicationSchedulePlanTime)
+            .filter_by(schedule_id=schedule_id)
+            .count(),
+            link_count,
+        )
+
+        plan_page = self.client.get("/my-medication-plan")
+        self.assertNotIn(
+            f'data-schedule-id="{schedule_id}"'.encode(),
+            plan_page.data,
+        )
+        self.assertIn(
+            f'data-schedule-id="{stored_other.schedule_id}"'.encode(),
+            plan_page.data,
+        )
+
+        delete_response = self.post_delete_time(stored_plan, morning)
+        self.assertEqual(delete_response.status_code, 302)
+        self.assertIsNone(
+            db.session.get(MedicationPlanTime, morning.plan_time_id)
+        )
+        self.assertIsNotNone(db.session.get(MedicationTime, snapshot_id))
+
+    def test_deactivate_preserves_supersedes_chain(self):
+        self.log_in()
+        plan = self.add_plan()
+        plan_time = self.add_plan_time(plan, time(20, 0))
+        predecessor = self.add_existing_schedule(
+            self.user_medicine,
+            plan=plan,
+            plan_times=(plan_time,),
+            active=False,
+        )
+        successor = self.add_existing_schedule(
+            self.user_medicine,
+            plan=plan,
+            plan_times=(plan_time,),
+        )
+        successor.supersedes_schedule_id = predecessor.schedule_id
+        db.session.commit()
+        predecessor_snapshot = {
+            column.name: getattr(predecessor, column.name)
+            for column in MedicationSchedule.__table__.columns
+        }
+
+        response = self.post_deactivate()
+
+        self.assertEqual(response.status_code, 302)
+        db.session.expire_all()
+        stored_predecessor = db.session.get(
+            MedicationSchedule,
+            predecessor.schedule_id,
+        )
+        stored_successor = db.session.get(
+            MedicationSchedule,
+            successor.schedule_id,
+        )
+        self.assertEqual(
+            {
+                column.name: getattr(stored_predecessor, column.name)
+                for column in MedicationSchedule.__table__.columns
+            },
+            predecessor_snapshot,
+        )
+        self.assertFalse(stored_successor.is_active)
+        self.assertEqual(
+            stored_successor.supersedes_schedule_id,
+            predecessor.schedule_id,
+        )
+        self.assertEqual(db.session.query(MedicationSchedule).count(), 2)
+
+    def test_reactivate_after_deactivate_adds_independent_plan_schedule(self):
+        self.log_in()
+        plan = self.add_plan()
+        plan_time = self.add_plan_time(plan, time(20, 0))
+        old_schedule = self.add_existing_schedule(
+            self.user_medicine,
+            plan=plan,
+            plan_times=(plan_time,),
+        )
+        old_schedule_id = old_schedule.schedule_id
+        registration_token = self.get_csrf_token("/my-medicines")
+
+        self.post_deactivate()
+        register_response = self.client.post(
+            f"/my-medicines/add/{self.medicine.item_seq}",
+            data={"csrf_token": registration_token},
+        )
+
+        self.assertEqual(register_response.status_code, 302)
+        db.session.expire_all()
+        stored_old = db.session.get(MedicationSchedule, old_schedule_id)
+        reactivated = db.session.get(
+            UserMedicine,
+            self.user_medicine_id,
+        )
+        self.assertTrue(reactivated.is_active)
+        self.assertFalse(stored_old.is_active)
+        self.assertEqual(db.session.query(MedicationSchedule).count(), 1)
+        selection = self.client.get(self.select_medicine_url(plan))
+        self.assertIn(
+            self.plan_medicine_form_url(plan, reactivated).encode(),
+            selection.data,
+        )
+
+        add_response = self.post_plan_medicine(plan, (plan_time,))
+
+        self.assertEqual(add_response.status_code, 302)
+        schedules = db.session.scalars(
+            db.select(MedicationSchedule)
+            .where(
+                MedicationSchedule.user_medicine_id
+                == self.user_medicine_id
+            )
+            .order_by(MedicationSchedule.schedule_id)
+        ).all()
+        self.assertEqual(len(schedules), 2)
+        self.assertEqual(schedules[0].schedule_id, old_schedule_id)
+        self.assertFalse(schedules[0].is_active)
+        self.assertNotEqual(schedules[1].schedule_id, old_schedule_id)
+        self.assertTrue(schedules[1].is_active)
+        self.assertIsNone(schedules[1].supersedes_schedule_id)
+
+    def test_deactivate_plan_conflicts_and_commit_failure_roll_back(self):
+        self.log_in()
+        plan = self.add_plan()
+        plan_time = self.add_plan_time(plan, time(20, 0))
+        schedule = self.add_existing_schedule(
+            self.user_medicine,
+            plan=plan,
+            plan_times=(plan_time,),
+            pending=True,
+        )
+        old_plan_updated_at = plan.updated_at
+        old_schedule_updated_at = schedule.updated_at
+        old_user_medicine_updated_at = self.user_medicine.updated_at
+        snapshot_id = schedule.times[0].medication_time_id
+        link_count = db.session.query(
+            MedicationSchedulePlanTime
+        ).filter_by(schedule_id=schedule.schedule_id).count()
+
+        failures = (
+            (
+                "plan_claim",
+                patch.object(
+                    app_module,
+                    "claim_medication_plan_change",
+                    return_value=False,
+                ),
+            ),
+            (
+                "schedule_claim",
+                patch.object(
+                    app_module,
+                    "claim_medication_schedule_removal",
+                    return_value=False,
+                ),
+            ),
+            (
+                "commit",
+                patch.object(
+                    db.session,
+                    "commit",
+                    side_effect=SQLAlchemyError("forced commit failure"),
+                ),
+            ),
+        )
+
+        for failure_name, failure_patch in failures:
+            with self.subTest(failure_name=failure_name), failure_patch:
+                response = self.post_deactivate()
+
+            self.assertEqual(response.status_code, 302)
+            db.session.expire_all()
+            stored_plan = db.session.get(MedicationPlan, plan.plan_id)
+            stored_schedule = db.session.get(
+                MedicationSchedule,
+                schedule.schedule_id,
+            )
+            stored_user_medicine = db.session.get(
+                UserMedicine,
+                self.user_medicine_id,
+            )
+            self.assertEqual(stored_plan.updated_at, old_plan_updated_at)
+            self.assertTrue(stored_schedule.is_active)
+            self.assertIsNone(stored_schedule.closed_at)
+            self.assertEqual(
+                stored_schedule.updated_at,
+                old_schedule_updated_at,
+            )
+            self.assertTrue(stored_user_medicine.is_active)
+            self.assertTrue(stored_user_medicine.schedule_setup_pending)
+            self.assertEqual(
+                stored_user_medicine.updated_at,
+                old_user_medicine_updated_at,
+            )
+            self.assertIsNotNone(db.session.get(MedicationTime, snapshot_id))
+            self.assertEqual(
+                db.session.query(MedicationSchedulePlanTime)
+                .filter_by(schedule_id=schedule.schedule_id)
+                .count(),
+                link_count,
+            )
 
     def test_removed_plan_schedule_can_be_added_as_a_new_course(self):
         self.log_in()

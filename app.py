@@ -556,6 +556,33 @@ def claim_medication_schedule_removal(
     return result.rowcount == 1
 
 
+def claim_user_medicine_deactivation(
+    user_medicine,
+    *,
+    old_updated_at,
+    remove_time,
+):
+
+    result = db.session.execute(
+        update(UserMedicine)
+        .where(
+            UserMedicine.user_medicine_id
+            == user_medicine.user_medicine_id,
+            UserMedicine.user_id == current_user.user_id,
+            UserMedicine.is_active.is_(True),
+            UserMedicine.updated_at == old_updated_at,
+        )
+        .values(
+            is_active=False,
+            schedule_setup_pending=False,
+            updated_at=remove_time,
+        )
+        .execution_options(synchronize_session=False)
+    )
+
+    return result.rowcount == 1
+
+
 def calculate_stored_schedule_summary(
     schedule,
     *,
@@ -673,7 +700,7 @@ def build_schedule_history_entry(
 
     summary_reference_at = reference_at
 
-    if schedule.plan_id is not None and schedule.closed_at is not None:
+    if schedule.closed_at is not None:
         summary_reference_at = min(
             as_utc(reference_at),
             as_utc(schedule.closed_at),
@@ -3836,10 +3863,85 @@ def deactivate_my_medicine(user_medicine_id):
         flash("이미 내 복용약에서 제거된 약입니다.", "info")
         return redirect(url_for("my_medicines"))
 
-    user_medicine.is_active = False
-    user_medicine.schedule_setup_pending = False
+    remove_time = utc_now()
+    old_user_medicine_updated_at = user_medicine.updated_at
+    active_schedules = db.session.scalars(
+        db.select(MedicationSchedule)
+        .options(selectinload(MedicationSchedule.plan))
+        .where(
+            MedicationSchedule.user_medicine_id
+            == user_medicine.user_medicine_id,
+            MedicationSchedule.is_active.is_(True),
+        )
+        .order_by(MedicationSchedule.schedule_id.asc())
+    ).all()
+    old_schedule_updated_at = {
+        schedule.schedule_id: schedule.updated_at
+        for schedule in active_schedules
+    }
+    active_plans = {
+        schedule.plan.plan_id: schedule.plan
+        for schedule in active_schedules
+        if (
+            schedule.plan is not None
+            and schedule.plan.is_active
+            and schedule.plan.user_id == current_user.user_id
+        )
+    }
+    old_plan_updated_at = {
+        plan_id: plan.updated_at
+        for plan_id, plan in active_plans.items()
+    }
 
     try:
+        claimed = all(
+            claim_medication_plan_change(
+                plan,
+                old_updated_at=old_plan_updated_at[plan_id],
+                action_time=remove_time,
+            )
+            for plan_id, plan in sorted(active_plans.items())
+        )
+
+        if claimed:
+            claimed = all(
+                claim_medication_schedule_removal(
+                    schedule,
+                    old_updated_at=(
+                        old_schedule_updated_at[schedule.schedule_id]
+                    ),
+                    remove_time=remove_time,
+                )
+                for schedule in active_schedules
+            )
+
+        if claimed:
+            claimed = claim_user_medicine_deactivation(
+                user_medicine,
+                old_updated_at=old_user_medicine_updated_at,
+                remove_time=remove_time,
+            )
+
+        if not claimed:
+            db.session.rollback()
+            flash(
+                "내 복용약 또는 복용 일정이 다른 요청에서 변경되었습니다. "
+                "최신 내용을 확인해주세요.",
+                "error",
+            )
+            return redirect(url_for("my_medicines"))
+
+        for plan in active_plans.values():
+            plan.updated_at = remove_time
+
+        for schedule in active_schedules:
+            schedule.is_active = False
+            schedule.closed_at = remove_time
+            schedule.updated_at = remove_time
+
+        user_medicine.is_active = False
+        user_medicine.schedule_setup_pending = False
+        user_medicine.updated_at = remove_time
         db.session.commit()
     except SQLAlchemyError:
         db.session.rollback()

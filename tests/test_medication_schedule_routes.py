@@ -30,6 +30,7 @@ from services.medication_schedule_service import (
 EDIT_TRACKING_TIME = datetime(2026, 10, 5, 5, 0, tzinfo=UTC)
 FIRST_EDIT_TIME = datetime(2026, 10, 6, 6, 0, tzinfo=UTC)
 SECOND_EDIT_TIME = datetime(2026, 10, 6, 23, 0, tzinfo=UTC)
+REMOVE_TIME = datetime(2026, 10, 7, 3, 0, tzinfo=UTC)
 
 
 class MedicationScheduleRouteTest(unittest.TestCase):
@@ -156,6 +157,21 @@ class MedicationScheduleRouteTest(unittest.TestCase):
         return (
             "/my-medicines/"
             f"{user_medicine_id or self.user_medicine_id}/history"
+        )
+
+    def deactivate_url(self, user_medicine_id=None):
+        return (
+            "/my-medicines/"
+            f"{user_medicine_id or self.user_medicine_id}/deactivate"
+        )
+
+    def post_deactivate(self, user_medicine_id=None, *, token=None):
+        if token is None:
+            token = self.get_csrf_token("/my-medicines")
+
+        return self.client.post(
+            self.deactivate_url(user_medicine_id),
+            data={"csrf_token": token},
         )
 
     def log_in(self):
@@ -2718,23 +2734,31 @@ class MedicationScheduleRouteTest(unittest.TestCase):
             message_response.data,
         )
 
-    def test_deactivate_clears_pending_and_preserves_schedule_and_times(self):
+    def test_deactivate_closes_legacy_schedule_and_preserves_history(self):
         self.log_in()
         schedule = self.add_schedule(
             medication_times=(time(8, 0), time(20, 0)),
             setup_pending=True,
         )
         schedule_id = schedule.schedule_id
+        immutable_values = {
+            column.name: getattr(schedule, column.name)
+            for column in MedicationSchedule.__table__.columns
+            if column.name not in {"is_active", "closed_at", "updated_at"}
+        }
         stored_times = [
             (value.medication_time_id, value.time_of_day)
             for value in schedule.times
         ]
-        token = self.get_csrf_token("/my-medicines")
+        old_registered_at = self.user_medicine.registered_at
+        schedule_count = db.session.query(MedicationSchedule).count()
 
-        response = self.client.post(
-            f"/my-medicines/{self.user_medicine_id}/deactivate",
-            data={"csrf_token": token},
-        )
+        with patch.object(
+            app_module,
+            "utc_now",
+            return_value=REMOVE_TIME,
+        ):
+            response = self.post_deactivate()
 
         self.assertEqual(response.status_code, 302)
         db.session.expire_all()
@@ -2748,7 +2772,22 @@ class MedicationScheduleRouteTest(unittest.TestCase):
         )
         self.assertFalse(deactivated.is_active)
         self.assertFalse(deactivated.schedule_setup_pending)
-        self.assertTrue(stored_schedule.is_active)
+        self.assertEqual(deactivated.registered_at, old_registered_at)
+        self.assertEqual(
+            app_module.as_utc(deactivated.updated_at),
+            REMOVE_TIME,
+        )
+        self.assertFalse(stored_schedule.is_active)
+        self.assertEqual(
+            app_module.as_utc(stored_schedule.closed_at),
+            REMOVE_TIME,
+        )
+        self.assertEqual(
+            app_module.as_utc(stored_schedule.updated_at),
+            REMOVE_TIME,
+        )
+        for name, value in immutable_values.items():
+            self.assertEqual(getattr(stored_schedule, name), value)
         self.assertEqual(
             [
                 (value.medication_time_id, value.time_of_day)
@@ -2756,6 +2795,225 @@ class MedicationScheduleRouteTest(unittest.TestCase):
             ],
             stored_times,
         )
+        self.assertEqual(
+            db.session.query(MedicationSchedule).count(),
+            schedule_count,
+        )
+        history = self.client.get(self.history_url())
+        self.assertEqual(history.status_code, 200)
+        self.assertIn(f'data-schedule-id="{schedule_id}"'.encode(), history.data)
+        history_entry = app_module.build_schedule_history_entry(
+            deactivated,
+            stored_schedule,
+            reference_at=datetime(2100, 1, 1, tzinfo=UTC),
+            timezone_name=self.user.timezone,
+        )
+        self.assertEqual(history_entry["status"], "past")
+
+    def test_deactivate_requires_login_owner_and_active_user_medicine(self):
+        login_token = self.get_csrf_token("/login")
+        login_required_response = self.post_deactivate(token=login_token)
+        self.assertEqual(login_required_response.status_code, 302)
+        self.assertIn("/login", login_required_response.headers["Location"])
+
+        self.log_in()
+        token = self.get_csrf_token("/my-medicines")
+        owner_response = self.post_deactivate(
+            self.other_user_medicine_id,
+            token=token,
+        )
+        self.assertEqual(owner_response.status_code, 404)
+
+        inactive_response = self.post_deactivate(
+            self.inactive_user_medicine_id,
+            token=token,
+        )
+        self.assertEqual(inactive_response.status_code, 302)
+        db.session.refresh(self.inactive_user_medicine)
+        self.assertFalse(self.inactive_user_medicine.is_active)
+
+    def test_repeated_deactivate_is_safe_no_op(self):
+        self.log_in()
+        schedule = self.add_schedule()
+        token = self.get_csrf_token("/my-medicines")
+
+        with patch.object(
+            app_module,
+            "utc_now",
+            return_value=REMOVE_TIME,
+        ) as first_clock:
+            first_response = self.post_deactivate(token=token)
+
+        first_clock.assert_called_once_with()
+        self.assertEqual(first_response.status_code, 302)
+        db.session.expire_all()
+        stored_user_medicine = db.session.get(
+            UserMedicine,
+            self.user_medicine_id,
+        )
+        stored_schedule = db.session.get(
+            MedicationSchedule,
+            schedule.schedule_id,
+        )
+        first_user_updated_at = stored_user_medicine.updated_at
+        first_schedule_updated_at = stored_schedule.updated_at
+        first_closed_at = stored_schedule.closed_at
+
+        with patch.object(
+            app_module,
+            "utc_now",
+            return_value=REMOVE_TIME + timedelta(minutes=1),
+        ) as second_clock:
+            second_response = self.post_deactivate(token=token)
+
+        second_clock.assert_not_called()
+        self.assertEqual(second_response.status_code, 302)
+        db.session.expire_all()
+        stored_user_medicine = db.session.get(
+            UserMedicine,
+            self.user_medicine_id,
+        )
+        stored_schedule = db.session.get(
+            MedicationSchedule,
+            schedule.schedule_id,
+        )
+        self.assertEqual(
+            stored_user_medicine.updated_at,
+            first_user_updated_at,
+        )
+        self.assertEqual(stored_schedule.updated_at, first_schedule_updated_at)
+        self.assertEqual(stored_schedule.closed_at, first_closed_at)
+
+    def test_deactivate_without_schedule_changes_only_user_medicine(self):
+        self.log_in()
+        old_registered_at = self.user_medicine.registered_at
+        schedule_count = db.session.query(MedicationSchedule).count()
+        time_count = db.session.query(MedicationTime).count()
+
+        with patch.object(
+            app_module,
+            "utc_now",
+            return_value=REMOVE_TIME,
+        ):
+            response = self.post_deactivate()
+
+        self.assertEqual(response.status_code, 302)
+        db.session.refresh(self.user_medicine)
+        self.assertFalse(self.user_medicine.is_active)
+        self.assertFalse(self.user_medicine.schedule_setup_pending)
+        self.assertEqual(self.user_medicine.registered_at, old_registered_at)
+        self.assertEqual(
+            app_module.as_utc(self.user_medicine.updated_at),
+            REMOVE_TIME,
+        )
+        self.assertEqual(
+            db.session.query(MedicationSchedule).count(),
+            schedule_count,
+        )
+        self.assertEqual(db.session.query(MedicationTime).count(), time_count)
+
+    def test_deactivate_closes_expired_open_schedule(self):
+        self.log_in()
+        schedule = self.add_schedule(
+            start_date_value=date(2020, 1, 1),
+            tracking_started_at=datetime(2020, 1, 1, tzinfo=UTC),
+            course_days=1,
+            medication_times=(time(8, 0),),
+        )
+
+        with patch.object(
+            app_module,
+            "utc_now",
+            return_value=REMOVE_TIME,
+        ):
+            response = self.post_deactivate()
+
+        self.assertEqual(response.status_code, 302)
+        db.session.refresh(schedule)
+        self.assertFalse(schedule.is_active)
+        self.assertEqual(app_module.as_utc(schedule.closed_at), REMOVE_TIME)
+
+    def test_deactivate_schedule_claim_conflict_rolls_back(self):
+        self.log_in()
+        schedule = self.add_schedule(setup_pending=True)
+        old_schedule_updated_at = schedule.updated_at
+        old_user_medicine_updated_at = self.user_medicine.updated_at
+
+        with patch.object(
+            app_module,
+            "claim_medication_schedule_removal",
+            return_value=False,
+        ):
+            response = self.post_deactivate()
+
+        self.assertEqual(response.status_code, 302)
+        db.session.expire_all()
+        stored_schedule = db.session.get(
+            MedicationSchedule,
+            schedule.schedule_id,
+        )
+        stored_user_medicine = db.session.get(
+            UserMedicine,
+            self.user_medicine_id,
+        )
+        self.assertTrue(stored_schedule.is_active)
+        self.assertIsNone(stored_schedule.closed_at)
+        self.assertEqual(stored_schedule.updated_at, old_schedule_updated_at)
+        self.assertTrue(stored_user_medicine.is_active)
+        self.assertTrue(stored_user_medicine.schedule_setup_pending)
+        self.assertEqual(
+            stored_user_medicine.updated_at,
+            old_user_medicine_updated_at,
+        )
+
+    def test_deactivate_user_claim_conflict_and_commit_failure_roll_back(self):
+        self.log_in()
+        schedule = self.add_schedule(setup_pending=True)
+        old_schedule_updated_at = schedule.updated_at
+        old_user_medicine_updated_at = self.user_medicine.updated_at
+
+        for failure_kind in ("claim", "commit"):
+            with self.subTest(failure_kind=failure_kind):
+                if failure_kind == "claim":
+                    failure_patch = patch.object(
+                        app_module,
+                        "claim_user_medicine_deactivation",
+                        return_value=False,
+                    )
+                else:
+                    failure_patch = patch.object(
+                        db.session,
+                        "commit",
+                        side_effect=SQLAlchemyError("forced commit failure"),
+                    )
+
+                with failure_patch:
+                    response = self.post_deactivate()
+
+                self.assertEqual(response.status_code, 302)
+                db.session.expire_all()
+                stored_schedule = db.session.get(
+                    MedicationSchedule,
+                    schedule.schedule_id,
+                )
+                stored_user_medicine = db.session.get(
+                    UserMedicine,
+                    self.user_medicine_id,
+                )
+                self.assertTrue(stored_schedule.is_active)
+                self.assertIsNone(stored_schedule.closed_at)
+                self.assertEqual(
+                    stored_schedule.updated_at,
+                    old_schedule_updated_at,
+                )
+                self.assertTrue(stored_user_medicine.is_active)
+                self.assertTrue(
+                    stored_user_medicine.schedule_setup_pending
+                )
+                self.assertEqual(
+                    stored_user_medicine.updated_at,
+                    old_user_medicine_updated_at,
+                )
 
     def test_existing_routes_and_my_medicine_mutations_still_work(self):
         self.assertEqual(self.client.get("/").status_code, 200)
