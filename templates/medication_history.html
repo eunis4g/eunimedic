@@ -72,6 +72,16 @@
                         </a>
                     </p>
                 {% endif %}
+                {% if entry.can_readd_to_plan %}
+                    <p>
+                        <a href="{{ url_for(
+                            'readd_medication_to_plan',
+                            schedule_id=schedule.schedule_id
+                        ) }}">
+                            일정에 다시 추가
+                        </a>
+                    </p>
+                {% endif %}
             </article>
         {% endfor %}
     {% else %}

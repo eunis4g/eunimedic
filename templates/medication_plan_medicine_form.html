@@ -11,6 +11,22 @@
     <h1>{{ heading }}</h1>
     <h2>{{ user_medicine.medicine.item_name }}</h2>
     <p>복용 값과 시간을 직접 선택해주세요.</p>
+    {% if mode == 'readd' %}
+        <p>
+            과거에 입력한 복용 정보를 참고하여
+            새 복용 일정을 만들 수 있습니다.
+        </p>
+        {% if missing_source_times %}
+            <ul aria-label="현재 일정표에서 사라진 과거 복용 시간">
+                {% for missing_time in missing_source_times %}
+                    <li>
+                        과거 일정의 {{ missing_time.strftime('%H:%M') }}
+                        시간은 현재 복용 일정표에 없습니다.
+                    </li>
+                {% endfor %}
+            </ul>
+        {% endif %}
+    {% endif %}
 
     {% with messages = get_flashed_messages(with_categories=true) %}
         {% if messages %}
@@ -149,6 +165,11 @@
             <a href="{{ url_for('my_medication_plan') }}">
                 내 복용약 일정으로 돌아가기
             </a>
+        {% elif mode == 'readd' %}
+            <a href="{{ url_for(
+                'medication_history',
+                user_medicine_id=user_medicine.user_medicine_id
+            ) }}">복용 이력으로 돌아가기</a>
         {% else %}
             <a href="{{ url_for(
                 'select_medication_for_plan',

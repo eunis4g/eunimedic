@@ -44,6 +44,35 @@
                                 'edit_medication_schedule',
                                 schedule_id=schedule.schedule_id
                             ) }}">복용 일정 수정</a>
+                            <form
+                                method="POST"
+                                action="{{ url_for(
+                                    'remove_medication_from_plan',
+                                    schedule_id=schedule.schedule_id
+                                ) }}"
+                                onsubmit="return confirm(
+                                    '이 약을 현재 복용 일정에서 제거하시겠습니까?\n과거 복용 일정은 기록에 남습니다.'
+                                )"
+                            >
+                                <input
+                                    type="hidden"
+                                    name="csrf_token"
+                                    value="{{ csrf_token() }}"
+                                >
+                                <input
+                                    type="hidden"
+                                    name="plan_version"
+                                    value="{{ plan_version }}"
+                                >
+                                <input
+                                    type="hidden"
+                                    name="schedule_version"
+                                    value="{{ schedule_versions[
+                                        schedule.schedule_id
+                                    ] }}"
+                                >
+                                <button type="submit">일정에서 제거</button>
+                            </form>
                         </li>
                     {% endfor %}
                 </ul>
