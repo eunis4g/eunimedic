@@ -2724,6 +2724,136 @@ class MedicationPlanRouteTest(unittest.TestCase):
         self.assertEqual(hidden_items, [])
         self.assertLessEqual(select_count, 7)
 
+    def test_plan_and_move_share_effectively_current_schedule_set(self):
+        self.log_in()
+        plan = self.add_plan()
+        shared_time = self.add_plan_time(plan, time(8, 0))
+        completed_only_time = self.add_plan_time(plan, time(9, 0))
+        self.medicine.item_name = "Medicine A Completed"
+        current_b = self.add_user_medicine("CURRENT-B")
+        current_b.medicine.item_name = "Medicine B Current"
+        current_c = self.add_user_medicine("CURRENT-C")
+        current_c.medicine.item_name = "Medicine C Current"
+        db.session.commit()
+        completed = self.add_existing_schedule(
+            self.user_medicine,
+            plan=plan,
+            plan_times=(shared_time, completed_only_time),
+            start_date_value=date(2020, 1, 1),
+            tracking_started_at=datetime(2020, 1, 1, tzinfo=UTC),
+            course_days=1,
+            medication_times=(time(8, 0), time(9, 0)),
+        )
+        running_b = self.add_existing_schedule(
+            current_b,
+            plan=plan,
+            plan_times=(shared_time,),
+            medication_times=(time(8, 0),),
+        )
+        running_c = self.add_existing_schedule(
+            current_c,
+            plan=plan,
+            plan_times=(shared_time,),
+            medication_times=(time(8, 0),),
+        )
+        completed_before = (
+            completed.is_active,
+            completed.closed_at,
+            completed.updated_at,
+        )
+        reference_time = datetime(2026, 10, 7, tzinfo=UTC)
+
+        with patch.object(
+            app_module,
+            "utc_now",
+            return_value=reference_time,
+        ):
+            plan_response = self.client.get("/my-medication-plan")
+            move_response = self.client.get(
+                self.move_plan_time_url(plan, shared_time)
+            )
+            edit_response = self.client.get(
+                self.plan_schedule_edit_url(completed)
+            )
+
+        self.assertEqual(plan_response.status_code, 200)
+        self.assertEqual(move_response.status_code, 200)
+        self.assertEqual(edit_response.status_code, 302)
+        self.assertIn(
+            "/my-medication-plan",
+            edit_response.headers["Location"],
+        )
+
+        plan_html = plan_response.data.decode("utf-8")
+        self.assertNotIn(
+            f'data-current-schedule-id="{completed.schedule_id}"',
+            plan_html,
+        )
+        self.assertNotIn(
+            f'data-schedule-id="{completed.schedule_id}"',
+            plan_html,
+        )
+        self.assertIn(
+            f'data-current-schedule-id="{running_b.schedule_id}"',
+            plan_html,
+        )
+        self.assertIn(
+            f'data-current-schedule-id="{running_c.schedule_id}"',
+            plan_html,
+        )
+        self.assertIn(
+            f'data-schedule-id="{running_b.schedule_id}"',
+            plan_html,
+        )
+        self.assertIn(
+            f'data-schedule-id="{running_c.schedule_id}"',
+            plan_html,
+        )
+        self.assertIn(
+            f'data-plan-time-id="{completed_only_time.plan_time_id}"',
+            plan_html,
+        )
+        self.assertNotIn(
+            self.plan_schedule_edit_url(completed),
+            plan_html,
+        )
+        self.assertNotIn(
+            self.plan_schedule_remove_url(completed),
+            plan_html,
+        )
+
+        move_html = move_response.data.decode("utf-8")
+        self.assertNotIn(
+            f'value="{completed.schedule_id}"',
+            move_html,
+        )
+        self.assertIn(f'value="{running_b.schedule_id}"', move_html)
+        self.assertIn(f'value="{running_c.schedule_id}"', move_html)
+
+        db.session.refresh(completed)
+        self.assertEqual(
+            (
+                completed.is_active,
+                completed.closed_at,
+                completed.updated_at,
+            ),
+            completed_before,
+        )
+        self.assertIsNotNone(
+            db.session.get(
+                MedicationPlanTime,
+                completed_only_time.plan_time_id,
+            )
+        )
+        history_response = self.client.get(
+            "/my-medicines/"
+            f"{self.user_medicine_id}/history"
+        )
+        self.assertIn(
+            f'data-schedule-id="{completed.schedule_id}"'.encode(),
+            history_response.data,
+        )
+
     def test_created_active_association_keeps_plan_time_delete_blocked(self):
         self.log_in()
         plan = self.add_plan()

@@ -8,6 +8,56 @@
 
 <body>
 
+    {% macro render_medication_entries(entries, show_remove) %}
+        {% for entry in entries %}
+            {% set user_medicine = entry.user_medicine %}
+            <article data-user-medicine-id="{{ user_medicine.user_medicine_id }}">
+                <h3>{{ user_medicine.medicine.item_name }}</h3>
+                <p>
+                    제조사:
+                    {{ user_medicine.medicine.entp_name or '제조사 정보 없음' }}
+                </p>
+                <p>
+                    <a href="{{ url_for(
+                        'medicine_detail',
+                        item_seq=user_medicine.medicine.item_seq
+                    ) }}">약 정보 보기</a>
+                </p>
+
+                {% if entry.has_history %}
+                    <p>
+                        <a href="{{ url_for(
+                            'medication_history',
+                            user_medicine_id=(
+                                user_medicine.user_medicine_id
+                            )
+                        ) }}">복용 이력</a>
+                    </p>
+                {% else %}
+                    <p>복용 이력 없음</p>
+                {% endif %}
+
+                {% if show_remove %}
+                    <form
+                        action="{{ url_for(
+                            'deactivate_my_medicine',
+                            user_medicine_id=user_medicine.user_medicine_id
+                        ) }}"
+                        method="POST"
+                        onsubmit="return confirm('내 복용약에서 제거하시겠습니까?');"
+                    >
+                        <input
+                            type="hidden"
+                            name="csrf_token"
+                            value="{{ csrf_token() }}"
+                        >
+                        <button type="submit">내 복용약에서 제거</button>
+                    </form>
+                {% endif %}
+            </article>
+        {% endfor %}
+    {% endmacro %}
+
     <h1>내 복용약</h1>
 
     {% with messages = get_flashed_messages(with_categories=true) %}
@@ -35,57 +85,23 @@
         </p>
     </nav>
 
-    <section aria-labelledby="my-medicines-heading">
-        <h2 id="my-medicines-heading">등록한 약</h2>
+    <section aria-labelledby="current-medicines-heading">
+        <h2 id="current-medicines-heading">현재 복용약</h2>
 
-        {% if medication_entries %}
-            {% for entry in medication_entries %}
-                {% set user_medicine = entry.user_medicine %}
-                <article data-user-medicine-id="{{ user_medicine.user_medicine_id }}">
-                    <h3>{{ user_medicine.medicine.item_name }}</h3>
-                    <p>
-                        제조사:
-                        {{ user_medicine.medicine.entp_name or '제조사 정보 없음' }}
-                    </p>
-                    <p>
-                        <a href="{{ url_for(
-                            'medicine_detail',
-                            item_seq=user_medicine.medicine.item_seq
-                        ) }}">약 상세 보기</a>
-                    </p>
-
-                    {% if entry.has_history %}
-                        <p>
-                            <a href="{{ url_for(
-                                'medication_history',
-                                user_medicine_id=(
-                                    user_medicine.user_medicine_id
-                                )
-                            ) }}">복용 이력</a>
-                        </p>
-                    {% else %}
-                        <p>복용 이력 없음</p>
-                    {% endif %}
-
-                    <form
-                        action="{{ url_for(
-                            'deactivate_my_medicine',
-                            user_medicine_id=user_medicine.user_medicine_id
-                        ) }}"
-                        method="POST"
-                        onsubmit="return confirm('내 복용약에서 제거하시겠습니까?');"
-                    >
-                        <input
-                            type="hidden"
-                            name="csrf_token"
-                            value="{{ csrf_token() }}"
-                        >
-                        <button type="submit">내 복용약에서 제거</button>
-                    </form>
-                </article>
-            {% endfor %}
+        {% if current_medication_entries %}
+            {{ render_medication_entries(current_medication_entries, true) }}
         {% else %}
-            <p>내 복용약에 등록된 약이 없습니다.</p>
+            <p>현재 복용 중인 약이 없습니다.</p>
+        {% endif %}
+    </section>
+
+    <section aria-labelledby="past-medicines-heading">
+        <h2 id="past-medicines-heading">복용했던 약</h2>
+
+        {% if past_medication_entries %}
+            {{ render_medication_entries(past_medication_entries, false) }}
+        {% else %}
+            <p>복용했던 약이 없습니다.</p>
         {% endif %}
     </section>
 

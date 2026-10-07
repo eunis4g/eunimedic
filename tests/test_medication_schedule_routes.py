@@ -184,6 +184,14 @@ class MedicationScheduleRouteTest(unittest.TestCase):
             rb'name="csrf_token"\s+value="([^"]+)"',
             response.data,
         )
+
+        if match is None and url == "/my-medicines":
+            response = self.client.get("/")
+            match = re.search(
+                rb'name="csrf_token"\s+value="([^"]+)"',
+                response.data,
+            )
+
         self.assertIsNotNone(match)
         return match.group(1).decode("utf-8")
 
@@ -2058,7 +2066,7 @@ class MedicationScheduleRouteTest(unittest.TestCase):
             old_time_rows,
         )
 
-    def test_my_medicines_ignores_schedule_completion_and_calculation_state(self):
+    def test_my_medicines_classifies_completion_and_preserves_errors(self):
         self.log_in()
         schedule = self.add_schedule(
             start_date_value=date(2020, 1, 1),
@@ -2069,6 +2077,21 @@ class MedicationScheduleRouteTest(unittest.TestCase):
         completed_response = self.client.get("/my-medicines")
         self.assertEqual(completed_response.status_code, 200)
         self.assertIn(self.medicine.item_name.encode(), completed_response.data)
+        completed_html = completed_response.data.decode("utf-8")
+        completed_marker = (
+            f'data-user-medicine-id="{self.user_medicine_id}"'
+        )
+        completed_past_start = completed_html.index(
+            'id="past-medicines-heading"'
+        )
+        self.assertNotIn(
+            completed_marker,
+            completed_html[:completed_past_start],
+        )
+        self.assertIn(
+            completed_marker,
+            completed_html[completed_past_start:],
+        )
         self.assertIn(self.history_url().encode(), completed_response.data)
         self.assertNotIn("과거에 복용했던 약".encode(), completed_response.data)
 
@@ -2078,6 +2101,10 @@ class MedicationScheduleRouteTest(unittest.TestCase):
         error_response = self.client.get("/my-medicines")
         self.assertEqual(error_response.status_code, 200)
         self.assertIn(self.medicine.item_name.encode(), error_response.data)
+        error_html = error_response.data.decode("utf-8")
+        error_past_start = error_html.index('id="past-medicines-heading"')
+        self.assertIn(completed_marker, error_html[:error_past_start])
+        self.assertNotIn(completed_marker, error_html[error_past_start:])
         self.assertNotIn("복용 설정 확인 필요".encode(), error_response.data)
 
     def test_my_medicines_shows_management_links_without_schedule_controls(self):
@@ -2132,6 +2159,121 @@ class MedicationScheduleRouteTest(unittest.TestCase):
             .filter_by(user_medicine_id=self.user_medicine_id)
             .count(),
             0,
+        )
+
+    def test_my_medicines_separates_current_and_planned_completed_rows(self):
+        self.log_in()
+        self.medicine.item_name = "Medicine A Completed"
+        current_b = Medicine(
+            item_seq="MED-CURRENT-B",
+            item_name="Medicine B Current",
+        )
+        current_c = Medicine(
+            item_seq="MED-CURRENT-C",
+            item_name="Medicine C Current",
+        )
+        no_schedule = Medicine(
+            item_seq="MED-NO-SCHEDULE",
+            item_name="Medicine D No Schedule",
+        )
+        current_b_row = UserMedicine(
+            user=self.user,
+            medicine=current_b,
+            registration_source="search",
+            is_active=True,
+        )
+        current_c_row = UserMedicine(
+            user=self.user,
+            medicine=current_c,
+            registration_source="search",
+            is_active=True,
+        )
+        no_schedule_row = UserMedicine(
+            user=self.user,
+            medicine=no_schedule,
+            registration_source="search",
+            is_active=True,
+        )
+        db.session.add_all(
+            [
+                current_b,
+                current_c,
+                no_schedule,
+                current_b_row,
+                current_c_row,
+                no_schedule_row,
+            ]
+        )
+        db.session.commit()
+        completed = self.add_schedule(
+            start_date_value=date(2020, 1, 1),
+            tracking_started_at=datetime(2020, 1, 1, tzinfo=UTC),
+            course_days=1,
+            medication_times=(time(8, 0),),
+        )
+        self.add_schedule(
+            user_medicine_id=current_b_row.user_medicine_id,
+        )
+        self.add_schedule(
+            user_medicine_id=current_c_row.user_medicine_id,
+            active=False,
+        )
+        self.add_schedule(
+            user_medicine_id=current_c_row.user_medicine_id,
+            active=True,
+        )
+
+        before_completed = (
+            completed.is_active,
+            completed.closed_at,
+            completed.updated_at,
+        )
+
+        with patch.object(
+            app_module,
+            "utc_now",
+            return_value=datetime(2026, 10, 7, tzinfo=UTC),
+        ):
+            response = self.client.get("/my-medicines")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.data.decode("utf-8")
+        current_start = html.index('id="current-medicines-heading"')
+        past_start = html.index('id="past-medicines-heading"')
+        current_section = html[current_start:past_start]
+        past_section = html[past_start:]
+
+        self.assertNotIn("Medicine A Completed", current_section)
+        self.assertIn("Medicine A Completed", past_section)
+        self.assertIn("Medicine B Current", current_section)
+        self.assertIn("Medicine C Current", current_section)
+        self.assertIn("Medicine D No Schedule", current_section)
+        self.assertNotIn("Medicine B Current", past_section)
+        self.assertNotIn("Medicine C Current", past_section)
+        self.assertEqual(
+            html.count(
+                f'data-user-medicine-id="{current_c_row.user_medicine_id}"'
+            ),
+            1,
+        )
+        self.assertNotIn(
+            self.deactivate_url(self.user_medicine_id),
+            past_section,
+        )
+        self.assertIn(self.history_url(), past_section)
+        self.assertNotIn(
+            f'data-user-medicine-id="{self.inactive_user_medicine_id}"',
+            html,
+        )
+
+        db.session.refresh(completed)
+        self.assertEqual(
+            (
+                completed.is_active,
+                completed.closed_at,
+                completed.updated_at,
+            ),
+            before_completed,
         )
 
     def test_current_medicine_with_old_history_is_listed_only_once(self):

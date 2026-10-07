@@ -29,7 +29,7 @@ from markupsafe import Markup
 from requests import RequestException
 from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import joinedload, selectinload
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
 
@@ -659,6 +659,32 @@ def calculate_stored_schedule_summary(
         reference_at=reference_at,
         timezone_name=timezone_name,
     )
+
+
+def classify_schedule_for_current_ui(
+    schedule,
+    *,
+    reference_at,
+    timezone_name,
+):
+
+    if not schedule.is_active or schedule.closed_at is not None:
+        return "past"
+
+    try:
+        summary = calculate_stored_schedule_summary(
+            schedule,
+            reference_at=reference_at,
+            timezone_name=timezone_name,
+        )
+    except MedicationScheduleCalculationError:
+        # A calculation error must not make an active schedule disappear.
+        return "current"
+
+    if summary.remaining == 0:
+        return "planned_completed"
+
+    return "current"
 
 
 def get_plan_schedule_addition_status(
@@ -1550,10 +1576,12 @@ def logout():
 @login_required
 def my_medication_plan():
 
+    view_time = None
     plan = get_current_active_medication_plan()
     plan_times = []
     plan_time_entries = []
     current_plan_schedules_by_id = {}
+    schedule_ui_statuses = {}
     plan_version = None
 
     if plan is not None:
@@ -1563,7 +1591,10 @@ def my_medication_plan():
                 selectinload(MedicationPlanTime.schedule_links)
                 .selectinload(MedicationSchedulePlanTime.schedule)
                 .selectinload(MedicationSchedule.user_medicine)
-                .selectinload(UserMedicine.medicine)
+                .selectinload(UserMedicine.medicine),
+                selectinload(MedicationPlanTime.schedule_links)
+                .selectinload(MedicationSchedulePlanTime.schedule)
+                .joinedload(MedicationSchedule.times),
             )
             .where(MedicationPlanTime.plan_id == plan.plan_id)
             .order_by(MedicationPlanTime.time_of_day.asc())
@@ -1586,6 +1617,26 @@ def my_medication_plan():
                     or not user_medicine.is_active
                     or schedule.schedule_id in seen_schedule_ids
                 ):
+                    continue
+
+                schedule_ui_status = schedule_ui_statuses.get(
+                    schedule.schedule_id
+                )
+
+                if schedule_ui_status is None:
+                    if view_time is None:
+                        view_time = utc_now()
+
+                    schedule_ui_status = classify_schedule_for_current_ui(
+                        schedule,
+                        reference_at=view_time,
+                        timezone_name=current_user.timezone,
+                    )
+                    schedule_ui_statuses[schedule.schedule_id] = (
+                        schedule_ui_status
+                    )
+
+                if schedule_ui_status != "current":
                     continue
 
                 seen_schedule_ids.add(schedule.schedule_id)
@@ -2744,12 +2795,13 @@ def delete_medication_plan_time(plan_id, plan_time_id):
 @app.route("/my-medicines", methods=["GET"])
 @login_required
 def my_medicines():
+    view_time = utc_now()
     user_medicines = db.session.scalars(
         db.select(UserMedicine)
         .options(
             selectinload(UserMedicine.medicine),
-            selectinload(UserMedicine.schedules).load_only(
-                MedicationSchedule.schedule_id
+            selectinload(UserMedicine.schedules).selectinload(
+                MedicationSchedule.times
             ),
         )
         .where(
@@ -2761,17 +2813,40 @@ def my_medicines():
             UserMedicine.user_medicine_id.desc(),
         )
     ).all()
-    medication_entries = [
-        {
+    current_medication_entries = []
+    past_medication_entries = []
+
+    for user_medicine in user_medicines:
+        active_schedules = [
+            schedule
+            for schedule in user_medicine.schedules
+            if schedule.is_active and schedule.closed_at is None
+        ]
+        active_schedule_statuses = [
+            classify_schedule_for_current_ui(
+                schedule,
+                reference_at=view_time,
+                timezone_name=current_user.timezone,
+            )
+            for schedule in active_schedules
+        ]
+        entry = {
             "user_medicine": user_medicine,
             "has_history": bool(user_medicine.schedules),
         }
-        for user_medicine in user_medicines
-    ]
+
+        if (
+            not user_medicine.schedules
+            or "current" in active_schedule_statuses
+        ):
+            current_medication_entries.append(entry)
+        else:
+            past_medication_entries.append(entry)
 
     return render_template(
         "my_medicines.html",
-        medication_entries=medication_entries,
+        current_medication_entries=current_medication_entries,
+        past_medication_entries=past_medication_entries,
     )
 
 
