@@ -335,12 +335,6 @@ class UserMedicine(db.Model):
         default=True,
         server_default=db.true(),
     )
-    schedule_setup_pending = db.Column(
-        db.Boolean,
-        nullable=False,
-        default=True,
-        server_default=db.true(),
-    )
     registered_at = db.Column(
         db.DateTime(timezone=True),
         nullable=False,
