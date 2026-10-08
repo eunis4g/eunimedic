@@ -20,6 +20,7 @@ from models import (
 
 BASE_REVISION = "c6f4a2d9e8b1"
 NOTIFICATION_REVISION = "d9e7b4c2a1f6"
+PROJECT_HEAD_REVISION = "f3a7c9e1b2d4"
 MIGRATIONS_DIRECTORY = str(
     Path(__file__).resolve().parents[1] / "migrations"
 )
@@ -396,6 +397,10 @@ class NotificationSchemaTest(unittest.TestCase):
                 0,
             )
         self._assert_database_is_healthy()
+        upgrade(
+            directory=MIGRATIONS_DIRECTORY,
+            revision=PROJECT_HEAD_REVISION,
+        )
         check(directory=MIGRATIONS_DIRECTORY)
 
         downgrade(

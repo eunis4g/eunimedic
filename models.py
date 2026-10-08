@@ -276,6 +276,170 @@ class PendingRegistration(db.Model):
     )
 
 
+class IdentityVerificationSession(db.Model):
+    __tablename__ = "identity_verification_sessions"
+
+    identity_verification_session_id = db.Column(
+        db.Integer,
+        primary_key=True,
+    )
+    verification_session_id = db.Column(
+        db.String(36),
+        nullable=False,
+    )
+    purpose = db.Column(
+        db.String(32),
+        nullable=False,
+    )
+    provider = db.Column(
+        db.String(32),
+        nullable=False,
+    )
+    status = db.Column(
+        db.String(16),
+        nullable=False,
+        default="pending",
+        server_default="pending",
+    )
+    provider_transaction_id = db.Column(
+        db.String(255),
+        nullable=True,
+    )
+    completion_claim_token = db.Column(
+        db.String(32),
+        nullable=True,
+    )
+    completion_claimed_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=True,
+    )
+    identity_subject_digest = db.Column(
+        db.String(64),
+        nullable=True,
+    )
+    age_eligibility = db.Column(
+        db.String(32),
+        nullable=True,
+    )
+    failure_code = db.Column(
+        db.String(64),
+        nullable=True,
+    )
+    expires_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+    )
+    verified_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=True,
+    )
+    consumed_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=True,
+    )
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=utc_now,
+    )
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=utc_now,
+        onupdate=utc_now,
+    )
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            "verification_session_id",
+            name="uq_identity_verification_session_public_id",
+        ),
+        db.UniqueConstraint(
+            "provider",
+            "provider_transaction_id",
+            name="uq_identity_verification_session_provider_transaction",
+        ),
+        db.CheckConstraint(
+            "purpose IN ('android_registration')",
+            name="ck_identity_verification_session_purpose",
+        ),
+        db.CheckConstraint(
+            "provider IN ('toss')",
+            name="ck_identity_verification_session_provider",
+        ),
+        db.CheckConstraint(
+            "status IN "
+            "('pending', 'verified', 'failed', 'expired', 'consumed')",
+            name="ck_identity_verification_session_status",
+        ),
+        db.CheckConstraint(
+            "age_eligibility IS NULL OR age_eligibility IN "
+            "('AGE_14_OR_OVER', 'UNDER_14')",
+            name="ck_identity_verification_session_age_eligibility",
+        ),
+        db.CheckConstraint(
+            "identity_subject_digest IS NULL "
+            "OR length(identity_subject_digest) = 64",
+            name="ck_identity_verification_session_identity_digest_length",
+        ),
+        db.CheckConstraint(
+            "(completion_claim_token IS NULL "
+            "AND completion_claimed_at IS NULL) "
+            "OR (completion_claim_token IS NOT NULL "
+            "AND completion_claimed_at IS NOT NULL)",
+            name="ck_identity_verification_session_completion_claim_pair",
+        ),
+        db.CheckConstraint(
+            "completion_claim_token IS NULL OR status = 'pending'",
+            name="ck_identity_verification_session_completion_claim_state",
+        ),
+        db.CheckConstraint(
+            "completion_claim_token IS NULL "
+            "OR provider_transaction_id IS NOT NULL",
+            name=(
+                "ck_identity_verification_session_completion_claim_transaction"
+            ),
+        ),
+        db.CheckConstraint(
+            "completion_claim_token IS NULL "
+            "OR (identity_subject_digest IS NULL "
+            "AND age_eligibility IS NULL "
+            "AND verified_at IS NULL)",
+            name="ck_identity_verification_session_completion_claim_result",
+        ),
+        db.CheckConstraint(
+            "(status IN ('verified', 'consumed') "
+            "AND identity_subject_digest IS NOT NULL) "
+            "OR (status IN ('pending', 'failed', 'expired') "
+            "AND identity_subject_digest IS NULL)",
+            name="ck_identity_verification_session_identity_digest_state",
+        ),
+        db.CheckConstraint(
+            "status NOT IN ('verified', 'consumed') "
+            "OR (verified_at IS NOT NULL AND age_eligibility IS NOT NULL)",
+            name="ck_identity_verification_session_verified_state",
+        ),
+        db.CheckConstraint(
+            "(status = 'consumed' AND consumed_at IS NOT NULL) "
+            "OR (status <> 'consumed' AND consumed_at IS NULL)",
+            name="ck_identity_verification_session_consumed_state",
+        ),
+        db.CheckConstraint(
+            "expires_at > created_at",
+            name="ck_identity_verification_session_expiry",
+        ),
+        db.Index(
+            "ix_identity_verification_session_status_expires_at",
+            "status",
+            "expires_at",
+        ),
+        db.Index(
+            "ix_identity_verification_session_expires_at",
+            "expires_at",
+        ),
+    )
+
+
 class Medicine(db.Model):
     __tablename__ = "medicines"
 

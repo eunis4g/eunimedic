@@ -13,7 +13,7 @@ from models import MedicationOccurrence, MedicationSchedule, db
 CURRENT_HEAD = "dbc37b91f70b"
 PLAN_SCHEMA_REVISION = "4e2b7c91a6d5"
 SCHEDULE_SETUP_REMOVAL_REVISION = "7f2c9d1a4b6e"
-NEW_HEAD = "d9e7b4c2a1f6"
+NEW_HEAD = "f3a7c9e1b2d4"
 MIGRATIONS_DIRECTORY = str(
     Path(__file__).resolve().parents[1] / "migrations"
 )
