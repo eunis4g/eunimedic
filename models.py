@@ -78,6 +78,11 @@ class User(UserMixin, db.Model):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+    notification_dispatches = db.relationship(
+        "NotificationDispatch",
+        back_populates="user",
+        passive_deletes=True,
+    )
 
     def get_id(self):
 
@@ -137,6 +142,11 @@ class MedicationPlan(db.Model):
     )
     schedules = db.relationship(
         "MedicationSchedule",
+        back_populates="plan",
+        passive_deletes=True,
+    )
+    notification_dispatches = db.relationship(
+        "NotificationDispatch",
         back_populates="plan",
         passive_deletes=True,
     )
@@ -595,6 +605,12 @@ class MedicationSchedule(db.Model):
         back_populates="schedule",
         passive_deletes=True,
     )
+    course_root_notification_dispatches = db.relationship(
+        "NotificationDispatch",
+        back_populates="course_root_schedule",
+        foreign_keys="NotificationDispatch.course_root_schedule_id",
+        passive_deletes=True,
+    )
 
 
 class MedicationOccurrence(db.Model):
@@ -660,6 +676,243 @@ class MedicationOccurrence(db.Model):
     schedule = db.relationship(
         "MedicationSchedule",
         back_populates="occurrences",
+    )
+    notification_dispatch_members = db.relationship(
+        "NotificationDispatchMember",
+        back_populates="occurrence",
+        passive_deletes=True,
+    )
+
+
+class NotificationDispatch(db.Model):
+    __tablename__ = "notification_dispatches"
+
+    dispatch_id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(
+        db.Integer,
+        db.ForeignKey(
+            "users.user_id",
+            name="fk_notification_dispatch_user",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+    )
+    plan_id = db.Column(
+        db.Integer,
+        db.ForeignKey(
+            "medication_plans.plan_id",
+            name="fk_notification_dispatch_plan",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
+    course_root_schedule_id = db.Column(
+        db.Integer,
+        db.ForeignKey(
+            "medication_schedules.schedule_id",
+            name="fk_notification_dispatch_course_root_schedule",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+    )
+    notification_type = db.Column(
+        db.String(32),
+        nullable=False,
+    )
+    delivery_channel = db.Column(
+        db.String(16),
+        nullable=False,
+        default="email",
+        server_default="email",
+    )
+    # Invariant: normalize this delivery due time to UTC before storing it.
+    due_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+    )
+    status = db.Column(
+        db.String(16),
+        nullable=False,
+        default="pending",
+        server_default="pending",
+    )
+    attempt_count = db.Column(
+        db.Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    next_attempt_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=True,
+    )
+    claim_token = db.Column(
+        db.String(64),
+        nullable=True,
+    )
+    claimed_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=True,
+    )
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=utc_now,
+    )
+    sent_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=True,
+    )
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=utc_now,
+        onupdate=utc_now,
+    )
+    provider_message_id = db.Column(
+        db.String(255),
+        nullable=True,
+    )
+    last_error_code = db.Column(
+        db.String(64),
+        nullable=True,
+    )
+
+    __table_args__ = (
+        db.CheckConstraint(
+            "notification_type IN "
+            "('scheduled_occurrence', 'unanswered_review')",
+            name="ck_notification_dispatch_type",
+        ),
+        db.CheckConstraint(
+            "delivery_channel IN ('email')",
+            name="ck_notification_dispatch_channel",
+        ),
+        db.CheckConstraint(
+            "status IN "
+            "('pending', 'claimed', 'sent', 'failed', 'canceled')",
+            name="ck_notification_dispatch_status",
+        ),
+        db.CheckConstraint(
+            "attempt_count >= 0",
+            name="ck_notification_dispatch_attempt_count",
+        ),
+        db.CheckConstraint(
+            "(notification_type = 'scheduled_occurrence' "
+            "AND course_root_schedule_id IS NULL "
+            "AND (plan_id IS NOT NULL "
+            "OR status IN ('sent', 'failed', 'canceled'))) "
+            "OR (notification_type = 'unanswered_review' "
+            "AND course_root_schedule_id IS NOT NULL)",
+            name="ck_notification_dispatch_identity",
+        ),
+        db.CheckConstraint(
+            "(status = 'claimed' "
+            "AND claim_token IS NOT NULL "
+            "AND claimed_at IS NOT NULL) "
+            "OR (status <> 'claimed' "
+            "AND claim_token IS NULL "
+            "AND claimed_at IS NULL)",
+            name="ck_notification_dispatch_claim_state",
+        ),
+        db.CheckConstraint(
+            "(status = 'sent' AND sent_at IS NOT NULL) "
+            "OR (status <> 'sent' AND sent_at IS NULL)",
+            name="ck_notification_dispatch_sent_state",
+        ),
+        db.Index(
+            "uq_notification_dispatch_scheduled",
+            "user_id",
+            "plan_id",
+            "due_at",
+            "notification_type",
+            unique=True,
+            sqlite_where=text(
+                "notification_type = 'scheduled_occurrence' "
+                "AND plan_id IS NOT NULL"
+            ),
+        ),
+        db.Index(
+            "uq_notification_dispatch_unanswered_review",
+            "user_id",
+            "course_root_schedule_id",
+            "notification_type",
+            unique=True,
+            sqlite_where=text(
+                "notification_type = 'unanswered_review' "
+                "AND course_root_schedule_id IS NOT NULL"
+            ),
+        ),
+        db.Index(
+            "ix_notification_dispatch_worker_due",
+            "status",
+            "next_attempt_at",
+            "due_at",
+        ),
+    )
+
+    user = db.relationship(
+        "User",
+        back_populates="notification_dispatches",
+    )
+    plan = db.relationship(
+        "MedicationPlan",
+        back_populates="notification_dispatches",
+    )
+    course_root_schedule = db.relationship(
+        "MedicationSchedule",
+        back_populates="course_root_notification_dispatches",
+        foreign_keys=[course_root_schedule_id],
+    )
+    members = db.relationship(
+        "NotificationDispatchMember",
+        back_populates="dispatch",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+
+class NotificationDispatchMember(db.Model):
+    __tablename__ = "notification_dispatch_members"
+
+    dispatch_id = db.Column(
+        db.Integer,
+        db.ForeignKey(
+            "notification_dispatches.dispatch_id",
+            name="fk_notification_dispatch_member_dispatch",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+    )
+    occurrence_id = db.Column(
+        db.Integer,
+        db.ForeignKey(
+            "medication_occurrences.occurrence_id",
+            name="fk_notification_dispatch_member_occurrence",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        db.PrimaryKeyConstraint(
+            "dispatch_id",
+            "occurrence_id",
+            name="pk_notification_dispatch_member",
+        ),
+        db.Index(
+            "ix_notification_dispatch_members_occurrence_id",
+            "occurrence_id",
+        ),
+    )
+
+    dispatch = db.relationship(
+        "NotificationDispatch",
+        back_populates="members",
+    )
+    occurrence = db.relationship(
+        "MedicationOccurrence",
+        back_populates="notification_dispatch_members",
     )
 
 
