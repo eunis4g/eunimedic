@@ -77,6 +77,7 @@ from services.medication_schedule_service import (
     normalize_medication_times,
     validate_plan_capacity,
 )
+from notification_cli import register_notification_cli
 
 
 load_dotenv()
@@ -117,6 +118,7 @@ app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
 db.init_app(app)
 migrate = Migrate(app, db)
+register_notification_cli(app)
 
 
 @login_manager.user_loader
