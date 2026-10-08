@@ -1,7 +1,7 @@
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Iterable
 
-from sqlalchemy import select, tuple_
+from sqlalchemy import select, tuple_, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from models import MedicationOccurrence, MedicationSchedule
@@ -216,6 +216,83 @@ def get_or_create_medication_occurrence(
     return occurrence
 
 
+def claim_unanswered_medication_occurrence_response(
+    session,
+    occurrence: MedicationOccurrence,
+    *,
+    response_status: str,
+    action_time: datetime,
+) -> bool:
+    """Atomically record the first response for an unanswered row."""
+
+    _validate_response_status(response_status)
+    action_time_utc = normalize_occurrence_instant(
+        action_time,
+        name="action_time",
+    )
+    result = session.execute(
+        update(MedicationOccurrence)
+        .where(
+            MedicationOccurrence.occurrence_id
+            == occurrence.occurrence_id,
+            MedicationOccurrence.response_status.is_(None),
+            MedicationOccurrence.responded_at.is_(None),
+        )
+        .values(
+            response_status=response_status,
+            responded_at=action_time_utc,
+            updated_at=action_time_utc,
+        )
+        .execution_options(synchronize_session=False)
+    )
+
+    return result.rowcount == 1
+
+
+def claim_existing_medication_occurrence_response(
+    session,
+    occurrence: MedicationOccurrence,
+    *,
+    expected_updated_at: datetime,
+    expected_response_status: str | None,
+    expected_responded_at: datetime | None,
+    response_status: str,
+    action_time: datetime,
+) -> bool:
+    """Atomically replace a response when its prior version still matches."""
+
+    _validate_response_status(response_status)
+    action_time_utc = normalize_occurrence_instant(
+        action_time,
+        name="action_time",
+    )
+
+    if not isinstance(expected_updated_at, datetime):
+        raise MedicationOccurrenceError(
+            "expected_updated_at must be a datetime."
+        )
+
+    result = session.execute(
+        update(MedicationOccurrence)
+        .where(
+            MedicationOccurrence.occurrence_id
+            == occurrence.occurrence_id,
+            MedicationOccurrence.updated_at == expected_updated_at,
+            MedicationOccurrence.response_status
+            == expected_response_status,
+            MedicationOccurrence.responded_at == expected_responded_at,
+        )
+        .values(
+            response_status=response_status,
+            responded_at=action_time_utc,
+            updated_at=action_time_utc,
+        )
+        .execution_options(synchronize_session=False)
+    )
+
+    return result.rowcount == 1
+
+
 def list_existing_medication_occurrences(
     session,
     occurrence_keys: Iterable[tuple[int, datetime]],
@@ -281,6 +358,13 @@ def list_existing_medication_occurrences(
         ): occurrence
         for occurrence in occurrences
     }
+
+
+def _validate_response_status(value: str) -> None:
+    if value not in {"taken", "not_taken"}:
+        raise MedicationOccurrenceError(
+            "response_status must be taken or not_taken."
+        )
 
 
 def _validate_plan_bound_schedule(schedule: MedicationSchedule) -> None:

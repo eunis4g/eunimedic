@@ -8,7 +8,51 @@
 
 <body>
 
+    {% macro response_form(entry, response_status, button_label) %}
+        <form
+            method="POST"
+            action="{{ url_for(
+                'respond_medication_occurrence',
+                schedule_id=entry.schedule_id
+            ) }}"
+        >
+            <input
+                type="hidden"
+                name="csrf_token"
+                value="{{ csrf_token() }}"
+            >
+            <input
+                type="hidden"
+                name="scheduled_for"
+                value="{{ entry.scheduled_for.isoformat() }}"
+            >
+            <input
+                type="hidden"
+                name="response_status"
+                value="{{ response_status }}"
+            >
+            <input
+                type="hidden"
+                name="occurrence_version"
+                value="{{ entry.occurrence_version }}"
+            >
+            <button type="submit">{{ button_label }}</button>
+        </form>
+    {% endmacro %}
+
     <h1>오늘 복약</h1>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            <section aria-label="알림 메시지">
+                {% for category, message in messages %}
+                    <p role="{{ 'alert' if category == 'error' else 'status' }}">
+                        {{ message }}
+                    </p>
+                {% endfor %}
+            </section>
+        {% endif %}
+    {% endwith %}
 
     {% if local_date is not none %}
         <p>
@@ -45,6 +89,33 @@
                                     {{ entry.status_label }}
                                 </span>
                             </p>
+
+                            {% if entry.is_actionable %}
+                                {% if entry.response_status is none %}
+                                    {{ response_form(
+                                        entry,
+                                        'taken',
+                                        '복용했어요'
+                                    ) }}
+                                    {{ response_form(
+                                        entry,
+                                        'not_taken',
+                                        '복용하지 않았어요'
+                                    ) }}
+                                {% elif entry.response_status == 'taken' %}
+                                    {{ response_form(
+                                        entry,
+                                        'not_taken',
+                                        '복용하지 않았어요로 변경'
+                                    ) }}
+                                {% else %}
+                                    {{ response_form(
+                                        entry,
+                                        'taken',
+                                        '복용했어요로 변경'
+                                    ) }}
+                                {% endif %}
+                            {% endif %}
                         </li>
                     {% endfor %}
                 </ul>

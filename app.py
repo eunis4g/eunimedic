@@ -5,7 +5,7 @@ import math
 import os
 import re
 import secrets
-from datetime import date, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from uuid import uuid4
@@ -61,9 +61,14 @@ from models import (
 from services.email_service import EmailServiceError, send_verification_email
 from services.medication_occurrence_service import (
     MedicationOccurrenceError,
+    claim_existing_medication_occurrence_response,
+    claim_unanswered_medication_occurrence_response,
+    get_or_create_medication_occurrence,
     list_existing_medication_occurrences,
     list_schedule_occurrences_in_window,
     local_date_to_utc_window,
+    normalize_occurrence_instant,
+    validate_schedule_occurrence,
 )
 from services.medication_schedule_service import (
     MedicationScheduleCalculationError,
@@ -155,6 +160,8 @@ MEDICATION_DOSE_AMOUNT_PATTERN = re.compile(
 MEDICATION_TIME_PATTERN = re.compile(
     r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$"
 )
+MEDICATION_RESPONSE_STATUSES = {"taken", "not_taken"}
+VIRTUAL_OCCURRENCE_VERSION = "virtual"
 
 
 class VerificationTokenLogFilter(logging.Filter):
@@ -535,6 +542,11 @@ def serialize_schedule_version(value):
 
 
 def serialize_medication_plan_version(value):
+
+    return as_utc(value).isoformat(timespec="microseconds")
+
+
+def serialize_medication_occurrence_version(value):
 
     return as_utc(value).isoformat(timespec="microseconds")
 
@@ -1696,6 +1708,14 @@ def today_medications():
                         schedule.user_medicine.medicine.item_name
                     ),
                     "response_status": response_status,
+                    "occurrence_version": (
+                        serialize_medication_occurrence_version(
+                            occurrence.updated_at
+                        )
+                        if occurrence is not None
+                        else VIRTUAL_OCCURRENCE_VERSION
+                    ),
+                    "is_actionable": scheduled_for < view_time,
                     "status_code": status_code,
                     "status_label": status_label,
                 }
@@ -1739,6 +1759,165 @@ def today_medications():
         time_groups=time_groups,
         warning_message=warning_message,
     )
+
+
+@app.route(
+    "/medication-schedules/<int:schedule_id>/occurrences/response",
+    methods=["POST"],
+)
+@login_required
+def respond_medication_occurrence(schedule_id):
+    schedule = get_owned_medication_schedule(schedule_id)
+    action_time = utc_now()
+    response_status = request.form.get("response_status", "")
+    scheduled_for_value = request.form.get("scheduled_for", "")
+    occurrence_version = request.form.get("occurrence_version")
+
+    if (
+        response_status not in MEDICATION_RESPONSE_STATUSES
+        or occurrence_version is None
+    ):
+        db.session.rollback()
+        flash("복약 응답을 저장할 수 없습니다.", "error")
+        return redirect(url_for("today_medications"))
+
+    try:
+        submitted_scheduled_for = datetime.fromisoformat(
+            scheduled_for_value.strip()
+        )
+        scheduled_for = normalize_occurrence_instant(
+            submitted_scheduled_for
+        )
+        scheduled_for = validate_schedule_occurrence(
+            schedule,
+            timezone_name=current_user.timezone,
+            scheduled_for=scheduled_for,
+        )
+    except (MedicationOccurrenceError, TypeError, ValueError):
+        db.session.rollback()
+        flash("복약 응답을 저장할 수 없습니다.", "error")
+        return redirect(url_for("today_medications"))
+
+    if scheduled_for >= action_time:
+        db.session.rollback()
+        flash("예정된 복약에는 아직 응답할 수 없습니다.", "error")
+        return redirect(url_for("today_medications"))
+
+    occurrence_key = (schedule.schedule_id, scheduled_for)
+
+    try:
+        occurrence = list_existing_medication_occurrences(
+            db.session,
+            [occurrence_key],
+        ).get(occurrence_key)
+
+        if occurrence is not None and (
+            occurrence.response_status == response_status
+        ):
+            db.session.rollback()
+            flash("이미 같은 복약 응답이 저장되어 있습니다.", "success")
+            return redirect(url_for("today_medications"))
+
+        if occurrence is None:
+            if occurrence_version != VIRTUAL_OCCURRENCE_VERSION:
+                db.session.rollback()
+                flash(
+                    "복약 응답이 변경되었습니다. 최신 상태를 확인해 주세요.",
+                    "error",
+                )
+                return redirect(url_for("today_medications"))
+
+            occurrence = get_or_create_medication_occurrence(
+                db.session,
+                schedule,
+                timezone_name=current_user.timezone,
+                scheduled_for=scheduled_for,
+                action_time=action_time,
+            )
+
+        if occurrence_version == VIRTUAL_OCCURRENCE_VERSION:
+            if occurrence.response_status == response_status:
+                db.session.rollback()
+                flash(
+                    "이미 같은 복약 응답이 저장되어 있습니다.",
+                    "success",
+                )
+                return redirect(url_for("today_medications"))
+
+            if occurrence.response_status is not None:
+                db.session.rollback()
+                flash(
+                    "복약 응답이 변경되었습니다. 최신 상태를 확인해 주세요.",
+                    "error",
+                )
+                return redirect(url_for("today_medications"))
+
+            response_claimed = (
+                claim_unanswered_medication_occurrence_response(
+                    db.session,
+                    occurrence,
+                    response_status=response_status,
+                    action_time=action_time,
+                )
+            )
+        else:
+            current_occurrence_version = (
+                serialize_medication_occurrence_version(
+                    occurrence.updated_at
+                )
+            )
+
+            if occurrence_version != current_occurrence_version:
+                db.session.rollback()
+                flash(
+                    "복약 응답이 변경되었습니다. 최신 상태를 확인해 주세요.",
+                    "error",
+                )
+                return redirect(url_for("today_medications"))
+
+            response_claimed = (
+                claim_existing_medication_occurrence_response(
+                    db.session,
+                    occurrence,
+                    expected_updated_at=occurrence.updated_at,
+                    expected_response_status=occurrence.response_status,
+                    expected_responded_at=occurrence.responded_at,
+                    response_status=response_status,
+                    action_time=action_time,
+                )
+            )
+
+        if not response_claimed:
+            db.session.rollback()
+            latest_occurrence = list_existing_medication_occurrences(
+                db.session,
+                [occurrence_key],
+            ).get(occurrence_key)
+
+            if (
+                latest_occurrence is not None
+                and latest_occurrence.response_status == response_status
+            ):
+                flash(
+                    "이미 같은 복약 응답이 저장되어 있습니다.",
+                    "success",
+                )
+            else:
+                flash(
+                    "복약 응답이 변경되었습니다. 최신 상태를 확인해 주세요.",
+                    "error",
+                )
+
+            return redirect(url_for("today_medications"))
+
+        db.session.commit()
+    except (IntegrityError, SQLAlchemyError, MedicationOccurrenceError):
+        db.session.rollback()
+        flash("복약 응답을 저장하지 못했습니다.", "error")
+        return redirect(url_for("today_medications"))
+
+    flash("복약 응답을 저장했습니다.", "success")
+    return redirect(url_for("today_medications"))
 
 
 @app.route("/my-medication-plan", methods=["GET"])

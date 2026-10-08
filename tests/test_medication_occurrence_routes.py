@@ -1,3 +1,4 @@
+import re
 import tempfile
 import unittest
 from datetime import UTC, date, datetime, time
@@ -6,6 +7,7 @@ from unittest.mock import patch
 
 from flask import g
 from sqlalchemy import create_engine, event
+from sqlalchemy.exc import SQLAlchemyError
 
 import app as app_module
 import services.medication_occurrence_service as occurrence_service
@@ -222,6 +224,56 @@ class MedicationOccurrenceRouteTest(unittest.TestCase):
         self.assertEqual(mocked_utc_now.call_count, 1)
         return response
 
+    def get_csrf_token(self, url="/my-medication-plan"):
+        response = self.client.get(url)
+        match = re.search(
+            r'name="csrf_token"\s+value="([^"]+)"',
+            response.get_data(as_text=True),
+        )
+        self.assertIsNotNone(match)
+        return match.group(1)
+
+    def post_response(
+        self,
+        schedule,
+        scheduled_for,
+        response_status,
+        *,
+        occurrence_version=None,
+        action_time=utc_datetime(2026, 10, 8, 6),
+        csrf_token=None,
+        expected_utc_calls=1,
+    ):
+        if occurrence_version is None:
+            occurrence_version = app_module.VIRTUAL_OCCURRENCE_VERSION
+        if csrf_token is None:
+            csrf_token = self.get_csrf_token()
+
+        with patch.object(
+            app_module,
+            "utc_now",
+            return_value=action_time,
+        ) as mocked_utc_now:
+            response = self.client.post(
+                (
+                    f"/medication-schedules/{schedule.schedule_id}"
+                    "/occurrences/response"
+                ),
+                data={
+                    "csrf_token": csrf_token,
+                    "scheduled_for": scheduled_for.isoformat(),
+                    "response_status": response_status,
+                    "occurrence_version": occurrence_version,
+                },
+            )
+
+        self.assertEqual(mocked_utc_now.call_count, expected_utc_calls)
+        return response
+
+    def get_flash_messages(self):
+        with self.client.session_transaction() as session:
+            return tuple(session.get("_flashes", ()))
+
     def assert_entry_status(self, html, medicine_name, status_label):
         entry_start = html.index(medicine_name)
         entry_end = html.index("</li>", entry_start)
@@ -304,6 +356,8 @@ class MedicationOccurrenceRouteTest(unittest.TestCase):
         self.assert_entry_status(html, "복용 완료약", "복용했어요")
         self.assert_entry_status(html, "미복용약", "복용하지 않았어요")
         self.assert_entry_status(html, "응답 없는 약", "미응답")
+        self.assertIn("복용하지 않았어요로 변경", html)
+        self.assertIn("복용했어요로 변경", html)
 
     def test_entries_are_grouped_and_stably_sorted(self):
         self.log_in()
@@ -751,6 +805,571 @@ class MedicationOccurrenceRouteTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn('href="/today-medications"', html)
         self.assertIn("오늘 복약 확인", html)
+
+    def test_past_entries_have_response_forms_but_future_entries_do_not(self):
+        self.log_in()
+        self.add_schedule(medication_times=(time(8), time(20)))
+
+        html = self.get_today().get_data(as_text=True)
+        past_start = html.index("2026-10-07T23:00:00+00:00")
+        past_end = html.index("</li>", past_start)
+        future_start = html.index("2026-10-08T11:00:00+00:00")
+        future_end = html.index("</li>", future_start)
+        past_entry = html[past_start:past_end]
+        future_entry = html[future_start:future_end]
+
+        self.assertEqual(past_entry.count("<form"), 2)
+        self.assertIn('value="taken"', past_entry)
+        self.assertIn('value="not_taken"', past_entry)
+        self.assertIn('value="virtual"', past_entry)
+        self.assertNotIn("<form", future_entry)
+        self.assertNotIn("<button", future_entry)
+
+    def test_virtual_occurrences_can_record_taken_and_not_taken(self):
+        self.log_in()
+        taken_user_medicine = self.add_user_medicine(
+            item_seq="POST-TAKEN",
+            item_name="복용 응답 약",
+        )
+        skipped_user_medicine = self.add_user_medicine(
+            item_seq="POST-SKIPPED",
+            item_name="미복용 응답 약",
+        )
+        taken_schedule = self.add_schedule(
+            user_medicine=taken_user_medicine,
+        )
+        skipped_schedule = self.add_schedule(
+            user_medicine=skipped_user_medicine,
+        )
+        scheduled_for = utc_datetime(2026, 10, 7, 23)
+        action_time = utc_datetime(2026, 10, 8, 6)
+
+        taken_response = self.post_response(
+            taken_schedule,
+            scheduled_for,
+            "taken",
+            action_time=action_time,
+        )
+        skipped_response = self.post_response(
+            skipped_schedule,
+            scheduled_for,
+            "not_taken",
+            action_time=action_time,
+        )
+
+        self.assertEqual(taken_response.status_code, 302)
+        self.assertEqual(skipped_response.status_code, 302)
+        self.assertTrue(
+            taken_response.headers["Location"].endswith(
+                "/today-medications"
+            )
+        )
+        occurrences = db.session.query(MedicationOccurrence).order_by(
+            MedicationOccurrence.schedule_id
+        ).all()
+        self.assertEqual(len(occurrences), 2)
+        self.assertEqual(
+            {value.response_status for value in occurrences},
+            {"taken", "not_taken"},
+        )
+
+        for occurrence in occurrences:
+            self.assertEqual(occurrence.responded_at, action_time.replace(tzinfo=None))
+            self.assertEqual(occurrence.created_at, action_time.replace(tzinfo=None))
+            self.assertEqual(occurrence.updated_at, action_time.replace(tzinfo=None))
+
+        self.assertIn(
+            ("success", "복약 응답을 저장했습니다."),
+            self.get_flash_messages(),
+        )
+        html = self.get_today(view_time=action_time).get_data(as_text=True)
+        self.assert_entry_status(html, "복용 응답 약", "복용했어요")
+        self.assert_entry_status(
+            html,
+            "미복용 응답 약",
+            "복용하지 않았어요",
+        )
+
+    def test_response_does_not_change_schedule_accounting(self):
+        self.log_in()
+        schedule = self.add_schedule(
+            medication_times=(time(8), time(20)),
+            reported=1,
+            accounted=1,
+            course_days=4,
+        )
+        before = (
+            schedule.reported_doses_taken_before_tracking,
+            schedule.accounted_occurrence_count,
+            schedule.reminder_tracking_started_at,
+            schedule.course_days,
+            schedule.closed_at,
+            schedule.is_active,
+            schedule.updated_at,
+        )
+
+        self.post_response(
+            schedule,
+            utc_datetime(2026, 10, 8, 11),
+            "taken",
+            action_time=utc_datetime(2026, 10, 8, 12),
+        )
+
+        db.session.expire_all()
+        stored_schedule = db.session.get(
+            MedicationSchedule,
+            schedule.schedule_id,
+        )
+        self.assertEqual(
+            (
+                stored_schedule.reported_doses_taken_before_tracking,
+                stored_schedule.accounted_occurrence_count,
+                stored_schedule.reminder_tracking_started_at,
+                stored_schedule.course_days,
+                stored_schedule.closed_at,
+                stored_schedule.is_active,
+                stored_schedule.updated_at,
+            ),
+            before,
+        )
+
+    def test_future_exact_now_and_tampered_occurrences_are_rejected(self):
+        self.log_in()
+        schedule = self.add_schedule(
+            medication_times=(time(8), time(12), time(20)),
+        )
+
+        exact_response = self.post_response(
+            schedule,
+            VIEW_TIME,
+            "taken",
+            action_time=VIEW_TIME,
+        )
+        future_response = self.post_response(
+            schedule,
+            utc_datetime(2026, 10, 8, 11),
+            "taken",
+            action_time=VIEW_TIME,
+        )
+        tampered_response = self.post_response(
+            schedule,
+            utc_datetime(2026, 10, 8, 0),
+            "taken",
+            action_time=VIEW_TIME,
+        )
+
+        self.assertEqual(exact_response.status_code, 302)
+        self.assertEqual(future_response.status_code, 302)
+        self.assertEqual(tampered_response.status_code, 302)
+        self.assertEqual(db.session.query(MedicationOccurrence).count(), 0)
+
+    def test_post_security_rejects_missing_csrf_and_invalid_status(self):
+        self.log_in()
+        schedule = self.add_schedule()
+        scheduled_for = utc_datetime(2026, 10, 7, 23)
+        url = (
+            f"/medication-schedules/{schedule.schedule_id}"
+            "/occurrences/response"
+        )
+
+        missing_csrf = self.client.post(
+            url,
+            data={
+                "scheduled_for": scheduled_for.isoformat(),
+                "response_status": "taken",
+                "occurrence_version": "virtual",
+            },
+        )
+        invalid_status = self.post_response(
+            schedule,
+            scheduled_for,
+            "invalid",
+        )
+
+        self.assertEqual(missing_csrf.status_code, 400)
+        self.assertEqual(invalid_status.status_code, 302)
+        self.assertEqual(db.session.query(MedicationOccurrence).count(), 0)
+
+    def test_unauthenticated_post_redirects_and_other_owner_returns_404(self):
+        schedule = self.add_schedule()
+        scheduled_for = utc_datetime(2026, 10, 7, 23)
+        login_csrf = self.get_csrf_token("/login")
+        url = (
+            f"/medication-schedules/{schedule.schedule_id}"
+            "/occurrences/response"
+        )
+        unauthenticated = self.client.post(
+            url,
+            data={
+                "csrf_token": login_csrf,
+                "scheduled_for": scheduled_for.isoformat(),
+                "response_status": "taken",
+                "occurrence_version": "virtual",
+            },
+        )
+        self.assertEqual(unauthenticated.status_code, 302)
+        self.assertIn("/login", unauthenticated.headers["Location"])
+
+        other_user_medicine = self.add_user_medicine(
+            item_seq="POST-OTHER",
+            item_name="다른 사용자 응답 약",
+            user=self.other_user,
+        )
+        other_schedule = self.add_schedule(
+            user_medicine=other_user_medicine,
+            plan=self.other_plan,
+        )
+        self.log_in()
+        ownership_response = self.post_response(
+            other_schedule,
+            scheduled_for,
+            "taken",
+            expected_utc_calls=0,
+        )
+
+        self.assertEqual(ownership_response.status_code, 404)
+        self.assertEqual(db.session.query(MedicationOccurrence).count(), 0)
+
+    def test_legacy_schedule_response_is_rejected(self):
+        self.log_in()
+        legacy_schedule = self.add_schedule(plan_bound=False)
+
+        response = self.post_response(
+            legacy_schedule,
+            utc_datetime(2026, 10, 7, 23),
+            "taken",
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(db.session.query(MedicationOccurrence).count(), 0)
+
+    def test_existing_response_can_change_and_same_response_is_no_op(self):
+        self.log_in()
+        schedule = self.add_schedule()
+        scheduled_for = utc_datetime(2026, 10, 7, 23)
+        occurrence = self.add_occurrence(
+            schedule,
+            scheduled_for,
+            response_status="taken",
+        )
+        original_responded_at = occurrence.responded_at
+        original_updated_at = occurrence.updated_at
+        original_version = (
+            app_module.serialize_medication_occurrence_version(
+                occurrence.updated_at
+            )
+        )
+
+        same_response = self.post_response(
+            schedule,
+            scheduled_for,
+            "taken",
+            occurrence_version=original_version,
+            action_time=utc_datetime(2026, 10, 8, 7),
+        )
+        db.session.expire_all()
+        occurrence = db.session.get(
+            MedicationOccurrence,
+            occurrence.occurrence_id,
+        )
+        self.assertEqual(occurrence.responded_at, original_responded_at)
+        self.assertEqual(occurrence.updated_at, original_updated_at)
+
+        changed_at = utc_datetime(2026, 10, 8, 8)
+        changed_response = self.post_response(
+            schedule,
+            scheduled_for,
+            "not_taken",
+            occurrence_version=original_version,
+            action_time=changed_at,
+        )
+        db.session.expire_all()
+        occurrence = db.session.get(
+            MedicationOccurrence,
+            occurrence.occurrence_id,
+        )
+
+        self.assertEqual(same_response.status_code, 302)
+        self.assertEqual(changed_response.status_code, 302)
+        self.assertEqual(occurrence.response_status, "not_taken")
+        self.assertEqual(occurrence.responded_at, changed_at.replace(tzinfo=None))
+        self.assertEqual(occurrence.updated_at, changed_at.replace(tzinfo=None))
+
+    def test_virtual_first_response_conflict_preserves_the_winner(self):
+        self.log_in()
+        schedule = self.add_schedule()
+        scheduled_for = utc_datetime(2026, 10, 7, 23)
+
+        winner = self.post_response(
+            schedule,
+            scheduled_for,
+            "taken",
+            occurrence_version="virtual",
+            action_time=utc_datetime(2026, 10, 8, 6),
+        )
+        loser = self.post_response(
+            schedule,
+            scheduled_for,
+            "not_taken",
+            occurrence_version="virtual",
+            action_time=utc_datetime(2026, 10, 8, 7),
+        )
+
+        occurrences = db.session.query(MedicationOccurrence).all()
+        self.assertEqual(winner.status_code, 302)
+        self.assertEqual(loser.status_code, 302)
+        self.assertEqual(len(occurrences), 1)
+        self.assertEqual(occurrences[0].response_status, "taken")
+        self.assertIn(
+            (
+                "error",
+                "복약 응답이 변경되었습니다. 최신 상태를 확인해 주세요.",
+            ),
+            self.get_flash_messages(),
+        )
+
+    def test_virtual_same_response_retry_is_idempotent(self):
+        self.log_in()
+        schedule = self.add_schedule()
+        scheduled_for = utc_datetime(2026, 10, 7, 23)
+        self.post_response(
+            schedule,
+            scheduled_for,
+            "taken",
+            occurrence_version="virtual",
+            action_time=utc_datetime(2026, 10, 8, 6),
+        )
+        occurrence = db.session.query(MedicationOccurrence).one()
+        before = (occurrence.responded_at, occurrence.updated_at)
+
+        retry = self.post_response(
+            schedule,
+            scheduled_for,
+            "taken",
+            occurrence_version="virtual",
+            action_time=utc_datetime(2026, 10, 8, 7),
+        )
+
+        db.session.expire_all()
+        occurrence = db.session.query(MedicationOccurrence).one()
+        self.assertEqual(retry.status_code, 302)
+        self.assertEqual(
+            (occurrence.responded_at, occurrence.updated_at),
+            before,
+        )
+        self.assertIn(
+            ("success", "이미 같은 복약 응답이 저장되어 있습니다."),
+            self.get_flash_messages(),
+        )
+
+    def test_stale_existing_version_cannot_overwrite_a_newer_response(self):
+        self.log_in()
+        schedule = self.add_schedule()
+        scheduled_for = utc_datetime(2026, 10, 7, 23)
+        occurrence = self.add_occurrence(
+            schedule,
+            scheduled_for,
+            response_status="taken",
+        )
+        stale_version = app_module.serialize_medication_occurrence_version(
+            occurrence.updated_at
+        )
+        first_change_at = utc_datetime(2026, 10, 8, 7)
+        self.post_response(
+            schedule,
+            scheduled_for,
+            "not_taken",
+            occurrence_version=stale_version,
+            action_time=first_change_at,
+        )
+
+        stale_response = self.post_response(
+            schedule,
+            scheduled_for,
+            "taken",
+            occurrence_version=stale_version,
+            action_time=utc_datetime(2026, 10, 8, 8),
+        )
+
+        db.session.expire_all()
+        occurrence = db.session.get(
+            MedicationOccurrence,
+            occurrence.occurrence_id,
+        )
+        self.assertEqual(stale_response.status_code, 302)
+        self.assertEqual(occurrence.response_status, "not_taken")
+        self.assertEqual(
+            occurrence.updated_at,
+            first_change_at.replace(tzinfo=None),
+        )
+
+    def test_late_response_works_for_closed_completed_and_inactive_rows(self):
+        self.log_in()
+        closed_user_medicine = self.add_user_medicine(
+            item_seq="POST-CLOSED",
+            item_name="종료 일정 약",
+        )
+        completed_user_medicine = self.add_user_medicine(
+            item_seq="POST-COMPLETE",
+            item_name="완료 일정 약",
+        )
+        inactive_user_medicine = self.add_user_medicine(
+            item_seq="POST-INACTIVE",
+            item_name="삭제 약",
+            is_active=False,
+        )
+        schedules = [
+            self.add_schedule(
+                user_medicine=closed_user_medicine,
+                closed_at=VIEW_TIME,
+                active=False,
+            ),
+            self.add_schedule(
+                user_medicine=completed_user_medicine,
+                course_days=1,
+            ),
+            self.add_schedule(
+                user_medicine=inactive_user_medicine,
+                closed_at=VIEW_TIME,
+                active=False,
+            ),
+        ]
+        scheduled_for = utc_datetime(2026, 10, 7, 23)
+
+        for schedule in schedules:
+            response = self.post_response(
+                schedule,
+                scheduled_for,
+                "taken",
+            )
+            self.assertEqual(response.status_code, 302)
+
+        self.assertEqual(db.session.query(MedicationOccurrence).count(), 3)
+
+    def test_occurrence_at_or_after_closed_boundary_is_rejected(self):
+        self.log_in()
+        schedule = self.add_schedule(
+            medication_times=(time(8), time(12), time(14)),
+            closed_at=VIEW_TIME,
+            active=False,
+        )
+
+        at_boundary = self.post_response(
+            schedule,
+            VIEW_TIME,
+            "taken",
+            action_time=utc_datetime(2026, 10, 8, 6),
+        )
+        after_boundary = self.post_response(
+            schedule,
+            utc_datetime(2026, 10, 8, 5),
+            "taken",
+            action_time=utc_datetime(2026, 10, 8, 6),
+        )
+
+        self.assertEqual(at_boundary.status_code, 302)
+        self.assertEqual(after_boundary.status_code, 302)
+        self.assertEqual(db.session.query(MedicationOccurrence).count(), 0)
+
+    def test_response_updates_only_the_target_occurrence(self):
+        self.log_in()
+        other_user_medicine = self.add_user_medicine(
+            item_seq="POST-ISOLATED",
+            item_name="독립 응답 약",
+        )
+        first_schedule = self.add_schedule(
+            medication_times=(time(8), time(20)),
+        )
+        second_schedule = self.add_schedule(
+            user_medicine=other_user_medicine,
+            medication_times=(time(8),),
+        )
+        first_morning = self.add_occurrence(
+            first_schedule,
+            utc_datetime(2026, 10, 7, 23),
+        )
+        first_evening = self.add_occurrence(
+            first_schedule,
+            utc_datetime(2026, 10, 8, 11),
+        )
+        second_morning = self.add_occurrence(
+            second_schedule,
+            utc_datetime(2026, 10, 7, 23),
+        )
+        version = app_module.serialize_medication_occurrence_version(
+            first_morning.updated_at
+        )
+
+        self.post_response(
+            first_schedule,
+            utc_datetime(2026, 10, 7, 23),
+            "taken",
+            occurrence_version=version,
+        )
+
+        db.session.expire_all()
+        self.assertEqual(
+            db.session.get(
+                MedicationOccurrence,
+                first_morning.occurrence_id,
+            ).response_status,
+            "taken",
+        )
+        self.assertIsNone(
+            db.session.get(
+                MedicationOccurrence,
+                first_evening.occurrence_id,
+            ).response_status
+        )
+        self.assertIsNone(
+            db.session.get(
+                MedicationOccurrence,
+                second_morning.occurrence_id,
+            ).response_status
+        )
+
+    def test_old_version_response_does_not_touch_successor(self):
+        self.log_in()
+        old_schedule = self.add_schedule(
+            medication_times=(time(8),),
+            closed_at=VIEW_TIME,
+            active=False,
+        )
+        successor = self.add_schedule(
+            medication_times=(time(20),),
+            tracking_at=VIEW_TIME,
+            supersedes_schedule_id=old_schedule.schedule_id,
+        )
+
+        self.post_response(
+            old_schedule,
+            utc_datetime(2026, 10, 7, 23),
+            "taken",
+        )
+
+        occurrence = db.session.query(MedicationOccurrence).one()
+        self.assertEqual(occurrence.schedule_id, old_schedule.schedule_id)
+        self.assertNotEqual(occurrence.schedule_id, successor.schedule_id)
+
+    def test_commit_failure_rolls_back_materialization_and_response(self):
+        self.log_in()
+        schedule = self.add_schedule()
+        csrf_token = self.get_csrf_token()
+
+        with patch.object(
+            db.session,
+            "commit",
+            side_effect=SQLAlchemyError("commit failed"),
+        ):
+            response = self.post_response(
+                schedule,
+                utc_datetime(2026, 10, 7, 23),
+                "taken",
+                csrf_token=csrf_token,
+            )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(db.session.query(MedicationOccurrence).count(), 0)
 
 
 if __name__ == "__main__":
