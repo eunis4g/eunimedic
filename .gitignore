@@ -9,3 +9,5 @@ venv/
 
 static/uploads/*
 !static/uploads/.gitkeep
+
+logs/notifications/*.log
