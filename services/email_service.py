@@ -21,8 +21,14 @@ def _get_boolean_setting(name):
     raise EmailServiceError(f"{name} 환경변수 설정이 올바르지 않습니다.")
 
 
-def send_verification_email(email, verification_code):
-
+def _send_plain_text_email(
+    *,
+    to_email,
+    subject,
+    body,
+    message_id,
+    failure_message,
+):
     mail_server = os.getenv("MAIL_SERVER", "").strip()
     mail_port_text = os.getenv("MAIL_PORT", "").strip()
     mail_username = os.getenv("MAIL_USERNAME", "").strip()
@@ -51,15 +57,14 @@ def send_verification_email(email, verification_code):
         )
 
     message = EmailMessage()
-    message["Subject"] = "Medicine Web 이메일 인증번호"
+    message["Subject"] = subject
     message["From"] = mail_from
-    message["To"] = email
-    message.set_content(
-        "Medicine Web 이메일 인증 안내\n\n"
-        f"인증번호: {verification_code}\n"
-        "인증번호는 5분 동안 유효합니다.\n\n"
-        "본인이 요청하지 않았다면 이 메일을 무시해주세요."
-    )
+    message["To"] = to_email
+
+    if message_id is not None:
+        message["Message-ID"] = message_id
+
+    message.set_content(body)
 
     context = ssl.create_default_context()
 
@@ -87,4 +92,34 @@ def send_verification_email(email, verification_code):
 
             smtp_client.send_message(message)
     except (OSError, smtplib.SMTPException) as error:
-        raise EmailServiceError("인증 이메일 발송에 실패했습니다.") from error
+        raise EmailServiceError(failure_message) from error
+
+    return message_id
+
+
+def send_email(to_email, subject, body, message_id=None):
+    """Send a plain-text email with the project's existing SMTP settings."""
+
+    return _send_plain_text_email(
+        to_email=to_email,
+        subject=subject,
+        body=body,
+        message_id=message_id,
+        failure_message="이메일 발송에 실패했습니다.",
+    )
+
+
+def send_verification_email(email, verification_code):
+
+    _send_plain_text_email(
+        to_email=email,
+        subject="Medicine Web 이메일 인증번호",
+        body=(
+            "Medicine Web 이메일 인증 안내\n\n"
+            f"인증번호: {verification_code}\n"
+            "인증번호는 5분 동안 유효합니다.\n\n"
+            "본인이 요청하지 않았다면 이 메일을 무시해주세요."
+        ),
+        message_id=None,
+        failure_message="인증 이메일 발송에 실패했습니다.",
+    )
