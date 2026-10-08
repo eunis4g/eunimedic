@@ -27,7 +27,7 @@ from flask_migrate import Migrate
 from flask_wtf.csrf import CSRFProtect
 from markupsafe import Markup
 from requests import RequestException
-from sqlalchemy import update
+from sqlalchemy import or_, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import joinedload, selectinload
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -59,6 +59,12 @@ from models import (
     utc_now,
 )
 from services.email_service import EmailServiceError, send_verification_email
+from services.medication_occurrence_service import (
+    MedicationOccurrenceError,
+    list_existing_medication_occurrences,
+    list_schedule_occurrences_in_window,
+    local_date_to_utc_window,
+)
 from services.medication_schedule_service import (
     MedicationScheduleCalculationError,
     calculate_last_scheduled_occurrence,
@@ -1570,6 +1576,169 @@ def logout():
     flash("로그아웃되었습니다.", "success")
 
     return redirect(url_for("home"))
+
+
+@app.route("/today-medications", methods=["GET"])
+@login_required
+def today_medications():
+    view_time = utc_now()
+    occurrence_entries = []
+    time_groups = []
+    warning_message = None
+
+    try:
+        user_timezone = ZoneInfo(current_user.timezone)
+        local_date = view_time.astimezone(user_timezone).date()
+        day_start_utc, day_end_utc = local_date_to_utc_window(
+            local_date,
+            timezone_name=current_user.timezone,
+        )
+    except (
+        MedicationOccurrenceError,
+        ZoneInfoNotFoundError,
+        TypeError,
+        ValueError,
+    ):
+        app.logger.warning(
+            "Unable to build today's medication window for user %s.",
+            current_user.user_id,
+            exc_info=True,
+        )
+        local_date = None
+        user_timezone = None
+        warning_message = "오늘 복약 정보를 불러오지 못했습니다."
+    else:
+        candidate_schedules = db.session.scalars(
+            db.select(MedicationSchedule)
+            .join(MedicationSchedule.user_medicine)
+            .options(
+                joinedload(MedicationSchedule.user_medicine)
+                .joinedload(UserMedicine.medicine),
+                selectinload(MedicationSchedule.times),
+            )
+            .where(
+                UserMedicine.user_id == current_user.user_id,
+                MedicationSchedule.plan_id.is_not(None),
+                MedicationSchedule.reminder_tracking_started_at
+                < day_end_utc,
+                or_(
+                    MedicationSchedule.closed_at.is_(None),
+                    MedicationSchedule.closed_at > day_start_utc,
+                ),
+            )
+            .order_by(MedicationSchedule.schedule_id.asc())
+        ).all()
+        virtual_occurrences = []
+        skipped_schedule = False
+
+        for schedule in candidate_schedules:
+            try:
+                scheduled_instants = list_schedule_occurrences_in_window(
+                    schedule,
+                    timezone_name=current_user.timezone,
+                    window_start=day_start_utc,
+                    window_end=day_end_utc,
+                )
+            except MedicationOccurrenceError:
+                skipped_schedule = True
+                app.logger.warning(
+                    "Skipping invalid occurrence schedule %s for user %s.",
+                    schedule.schedule_id,
+                    current_user.user_id,
+                    exc_info=True,
+                )
+                continue
+
+            virtual_occurrences.extend(
+                (schedule, scheduled_for)
+                for scheduled_for in scheduled_instants
+            )
+
+        occurrence_keys = [
+            (schedule.schedule_id, scheduled_for)
+            for schedule, scheduled_for in virtual_occurrences
+        ]
+        existing_occurrences = list_existing_medication_occurrences(
+            db.session,
+            occurrence_keys,
+        )
+
+        for schedule, scheduled_for in virtual_occurrences:
+            occurrence = existing_occurrences.get(
+                (schedule.schedule_id, scheduled_for)
+            )
+            response_status = (
+                occurrence.response_status
+                if occurrence is not None
+                else None
+            )
+
+            if response_status == "taken":
+                status_label = "복용했어요"
+                status_code = "taken"
+            elif response_status == "not_taken":
+                status_label = "복용하지 않았어요"
+                status_code = "not_taken"
+            elif scheduled_for < view_time:
+                status_label = "미응답"
+                status_code = "unanswered"
+            else:
+                status_label = "예정"
+                status_code = "scheduled"
+
+            local_scheduled_for = scheduled_for.astimezone(user_timezone)
+            occurrence_entries.append(
+                {
+                    "schedule_id": schedule.schedule_id,
+                    "scheduled_for": scheduled_for,
+                    "local_scheduled_for": local_scheduled_for,
+                    "medicine_name": (
+                        schedule.user_medicine.medicine.item_name
+                    ),
+                    "response_status": response_status,
+                    "status_code": status_code,
+                    "status_label": status_label,
+                }
+            )
+
+        occurrence_entries.sort(
+            key=lambda entry: (
+                entry["local_scheduled_for"].replace(tzinfo=None),
+                entry["medicine_name"].casefold(),
+                entry["schedule_id"],
+            )
+        )
+
+        for entry in occurrence_entries:
+            local_scheduled_for = entry["local_scheduled_for"]
+            group_key = (
+                local_scheduled_for.hour,
+                local_scheduled_for.minute,
+                local_scheduled_for.second,
+                local_scheduled_for.microsecond,
+            )
+
+            if not time_groups or time_groups[-1]["key"] != group_key:
+                time_groups.append(
+                    {
+                        "key": group_key,
+                        "time_label": local_scheduled_for.strftime("%H:%M"),
+                        "entries": [],
+                    }
+                )
+
+            time_groups[-1]["entries"].append(entry)
+
+        if skipped_schedule:
+            warning_message = "일부 복약 정보를 불러오지 못했습니다."
+
+    return render_template(
+        "today_medications.html",
+        local_date=local_date,
+        timezone_name=current_user.timezone,
+        time_groups=time_groups,
+        warning_message=warning_message,
+    )
 
 
 @app.route("/my-medication-plan", methods=["GET"])

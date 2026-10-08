@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+    <meta charset="UTF-8">
+    <title>오늘 복약</title>
+</head>
+
+<body>
+
+    <h1>오늘 복약</h1>
+
+    {% if local_date is not none %}
+        <p>
+            <time datetime="{{ local_date.isoformat() }}">
+                {{ local_date.isoformat() }}
+            </time>
+            · {{ timezone_name }}
+        </p>
+    {% endif %}
+
+    {% if warning_message %}
+        <p role="alert">{{ warning_message }}</p>
+    {% endif %}
+
+    {% if time_groups %}
+        {% for group in time_groups %}
+            <section data-time-group="{{ group.time_label }}">
+                <h2>
+                    <time datetime="{{ group.time_label }}">
+                        {{ group.time_label }}
+                    </time>
+                </h2>
+
+                <ul>
+                    {% for entry in group.entries %}
+                        <li
+                            data-schedule-id="{{ entry.schedule_id }}"
+                            data-scheduled-for="{{ entry.scheduled_for.isoformat() }}"
+                        >
+                            <strong>{{ entry.medicine_name }}</strong>
+                            <p>
+                                상태:
+                                <span data-status="{{ entry.status_code }}">
+                                    {{ entry.status_label }}
+                                </span>
+                            </p>
+                        </li>
+                    {% endfor %}
+                </ul>
+            </section>
+        {% endfor %}
+    {% elif not warning_message %}
+        <p>오늘 복용할 약이 없습니다.</p>
+    {% endif %}
+
+    <p><a href="{{ url_for('my_medication_plan') }}">내 복용약 일정으로 이동</a></p>
+    <p><a href="{{ url_for('my_medicines') }}">내 복용약으로 이동</a></p>
+    <p><a href="{{ url_for('home') }}">홈으로 이동</a></p>
+
+</body>
+
+</html>

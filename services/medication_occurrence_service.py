@@ -1,4 +1,4 @@
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Iterable
 
 from sqlalchemy import select, tuple_
@@ -7,12 +7,51 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from models import MedicationOccurrence, MedicationSchedule
 from services.medication_schedule_service import (
     MedicationScheduleCalculationError,
+    _load_timezone,
+    _resolve_local_wall_time,
     generate_occurrences_in_window,
 )
 
 
 class MedicationOccurrenceError(ValueError):
     """Raised when a reliable scheduled occurrence cannot be produced."""
+
+
+def local_date_to_utc_window(
+    local_date: date,
+    *,
+    timezone_name: str,
+) -> tuple[datetime, datetime]:
+    """Return the UTC half-open window for one date in a user timezone."""
+
+    if not isinstance(local_date, date) or isinstance(local_date, datetime):
+        raise MedicationOccurrenceError(
+            "local_date must be a datetime.date value."
+        )
+
+    try:
+        next_local_date = local_date + timedelta(days=1)
+    except OverflowError as error:
+        raise MedicationOccurrenceError(
+            "local_date is outside the supported date range."
+        ) from error
+
+    try:
+        user_timezone = _load_timezone(timezone_name)
+        day_start = _resolve_local_wall_time(
+            local_date=local_date,
+            local_time=time.min,
+            timezone=user_timezone,
+        )
+        day_end = _resolve_local_wall_time(
+            local_date=next_local_date,
+            local_time=time.min,
+            timezone=user_timezone,
+        )
+    except MedicationScheduleCalculationError as error:
+        raise MedicationOccurrenceError(str(error)) from error
+
+    return day_start.astimezone(UTC), day_end.astimezone(UTC)
 
 
 def normalize_occurrence_instant(
