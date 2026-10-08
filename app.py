@@ -58,6 +58,14 @@ from models import (
     db,
     utc_now,
 )
+from services.account_service import (
+    ALLOWED_SPECIAL_CHARACTERS,
+    AccountValidationError,
+    normalize_and_validate_email,
+    normalize_email,
+    validate_password,
+    validate_username,
+)
 from services.email_service import EmailServiceError, send_verification_email
 from services.medication_occurrence_service import (
     MedicationOccurrenceError,
@@ -139,7 +147,6 @@ ALLOWED_IMAGE_MIME_TYPES = {
     "jpeg": "image/jpeg",
     "png": "image/png",
 }
-ALLOWED_SPECIAL_CHARACTERS = "!@#$%^&*()_-+=?.,"
 VERIFICATION_CODE_LIFETIME = timedelta(minutes=5)
 PENDING_REGISTRATION_LIFETIME = timedelta(minutes=30)
 RESEND_COOLDOWN = timedelta(seconds=60)
@@ -232,25 +239,6 @@ def sanitize_html(value):
     cleaned_html = HTML_CLEANER.clean(value or "")
 
     return Markup(cleaned_html)
-
-
-def is_valid_email(email):
-
-    if any(character.isspace() for character in email):
-        return False
-
-    if email.count("@") != 1:
-        return False
-
-    local_part, domain = email.rsplit("@", 1)
-
-    if not local_part or not domain:
-        return False
-
-    if "." not in domain or domain.startswith(".") or domain.endswith("."):
-        return False
-
-    return True
 
 
 def as_utc(value):
@@ -1136,91 +1124,63 @@ def register():
 
     if request.method == "POST":
         username = request.form.get("username", "")
-        email = request.form.get("email", "").strip().lower()
+        email = normalize_email(request.form.get("email", ""))
         password = request.form.get("password", "")
         password_confirm = request.form.get("password_confirm", "")
 
         if not username or not email or not password or not password_confirm:
             flash("모든 항목을 입력해주세요.", "error")
-        elif len(username) < 4:
-            flash("아이디는 4자 이상이어야 합니다.", "error")
-        elif len(username) > 20:
-            flash("아이디는 20자 이하여야 합니다.", "error")
-        elif not all(
-            ("a" <= character <= "z")
-            or ("0" <= character <= "9")
-            for character in username
-        ):
-            flash(
-                "아이디는 영문 소문자와 숫자만 사용할 수 있습니다.",
-                "error",
-            )
-        elif not any(
-            "a" <= character <= "z"
-            for character in username
-        ):
-            flash(
-                "아이디에는 영문 소문자가 1개 이상 포함되어야 합니다.",
-                "error",
-            )
-        elif len(email) > 320:
-            flash("이메일은 320자 이하로 입력해주세요.", "error")
-        elif not is_valid_email(email):
-            flash("올바른 이메일 형식을 입력해주세요.", "error")
-        elif len(password) < 8:
-            flash("비밀번호는 8자 이상이어야 합니다.", "error")
-        elif len(password) > 20:
-            flash("비밀번호는 20자 이하여야 합니다.", "error")
-        elif any(character.isspace() for character in password):
-            flash("비밀번호에는 공백을 사용할 수 없습니다.", "error")
-        elif any(
-            not (
-                ("A" <= character <= "Z")
-                or ("a" <= character <= "z")
-                or ("0" <= character <= "9")
-                or character in ALLOWED_SPECIAL_CHARACTERS
-            )
-            for character in password
-        ):
-            flash(
-                "비밀번호에는 영문자, 숫자와 안내된 특수문자만 사용할 수 있습니다.",
-                "error",
-            )
-        elif not any(
-            ("A" <= character <= "Z")
-            or ("a" <= character <= "z")
-            for character in password
-        ):
-            flash("비밀번호에는 영문자가 1개 이상 포함되어야 합니다.", "error")
-        elif not any(
-            "0" <= character <= "9"
-            for character in password
-        ):
-            flash("비밀번호에는 숫자가 1개 이상 포함되어야 합니다.", "error")
-        elif not any(
-            character in ALLOWED_SPECIAL_CHARACTERS
-            for character in password
-        ):
-            flash(
-                "비밀번호에는 특수문자가 1개 이상 포함되어야 합니다.",
-                "error",
-            )
-        elif password != password_confirm:
-            flash("비밀번호와 비밀번호 확인이 일치하지 않습니다.", "error")
         else:
-            existing_username = db.session.scalar(
-                db.select(User).where(User.username == username)
-            )
-            existing_email = db.session.scalar(
-                db.select(User).where(User.email == email)
-            )
-
-            if existing_username is not None:
-                flash("이미 사용 중인 아이디입니다.", "error")
-            elif existing_email is not None:
-                flash("이미 가입된 이메일입니다.", "error")
+            try:
+                username = validate_username(username)
+                email = normalize_and_validate_email(email)
+                password = validate_password(password)
+            except AccountValidationError as error:
+                flash(str(error), "error")
             else:
-                current_time = utc_now()
+                if password != password_confirm:
+                    flash(
+                        "비밀번호와 비밀번호 확인이 일치하지 않습니다.",
+                        "error",
+                    )
+                    return render_template(
+                        "register.html",
+                        username=username,
+                        email=email,
+                        allowed_special_characters=(
+                            ALLOWED_SPECIAL_CHARACTERS
+                        ),
+                    )
+
+                existing_username = db.session.scalar(
+                    db.select(User).where(User.username == username)
+                )
+                existing_email = db.session.scalar(
+                    db.select(User).where(User.email == email)
+                )
+
+                if existing_username is not None:
+                    flash("이미 사용 중인 아이디입니다.", "error")
+                    return render_template(
+                        "register.html",
+                        username=username,
+                        email=email,
+                        allowed_special_characters=(
+                            ALLOWED_SPECIAL_CHARACTERS
+                        ),
+                    )
+                elif existing_email is not None:
+                    flash("이미 가입된 이메일입니다.", "error")
+                    return render_template(
+                        "register.html",
+                        username=username,
+                        email=email,
+                        allowed_special_characters=(
+                            ALLOWED_SPECIAL_CHARACTERS
+                        ),
+                    )
+                else:
+                    current_time = utc_now()
                 pending_by_username = db.session.scalar(
                     db.select(PendingRegistration).where(
                         PendingRegistration.username == username
