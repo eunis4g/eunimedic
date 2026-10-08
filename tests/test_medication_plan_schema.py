@@ -7,12 +7,13 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import IntegrityError
 
 import app as app_module
-from models import db
+from models import MedicationOccurrence, MedicationSchedule, db
 
 
 CURRENT_HEAD = "dbc37b91f70b"
 PLAN_SCHEMA_REVISION = "4e2b7c91a6d5"
-NEW_HEAD = "7f2c9d1a4b6e"
+SCHEDULE_SETUP_REMOVAL_REVISION = "7f2c9d1a4b6e"
+NEW_HEAD = "c6f4a2d9e8b1"
 MIGRATIONS_DIRECTORY = str(
     Path(__file__).resolve().parents[1] / "migrations"
 )
@@ -457,6 +458,374 @@ class MedicationPlanSchemaTest(unittest.TestCase):
                 connection.execute(text("PRAGMA integrity_check")).scalar_one(),
                 "ok",
             )
+
+    def _upgrade_to_schedule_setup_removal_revision(self):
+        upgrade(
+            directory=MIGRATIONS_DIRECTORY,
+            revision=SCHEDULE_SETUP_REMOVAL_REVISION,
+        )
+
+    def _seed_occurrence_migration_data(self):
+        timestamp = "2026-10-08 00:00:00.000000"
+
+        with self.test_engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO medication_plans ("
+                    "plan_id, user_id, is_active, created_at, updated_at"
+                    ") VALUES (301, 1, 1, :timestamp, :timestamp)"
+                ),
+                {"timestamp": timestamp},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO medication_plan_times ("
+                    "plan_time_id, plan_id, time_of_day, created_at"
+                    ") VALUES "
+                    "(401, 301, '08:00:00.000000', :timestamp), "
+                    "(402, 301, '20:00:00.000000', :timestamp)"
+                ),
+                {"timestamp": timestamp},
+            )
+            connection.execute(
+                text(
+                    "UPDATE medication_schedules SET plan_id = 301 "
+                    "WHERE schedule_id = 101"
+                )
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO medication_schedule_plan_times ("
+                    "plan_id, schedule_id, plan_time_id"
+                    ") VALUES (301, 101, 401), (301, 101, 402)"
+                )
+            )
+            self._insert_schedule(
+                connection,
+                schedule_id=102,
+                is_active=False,
+                plan_id=301,
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO medication_times ("
+                    "medication_time_id, schedule_id, time_of_day"
+                    ") VALUES (203, 102, '08:00:00.000000')"
+                )
+            )
+
+    def _read_occurrence_migration_rows(self):
+        queries = {
+            "users": "SELECT * FROM users ORDER BY user_id",
+            "medicines": "SELECT * FROM medicines ORDER BY item_seq",
+            "user_medicines": (
+                "SELECT * FROM user_medicines ORDER BY user_medicine_id"
+            ),
+            "medication_plans": (
+                "SELECT * FROM medication_plans ORDER BY plan_id"
+            ),
+            "medication_plan_times": (
+                "SELECT * FROM medication_plan_times "
+                "ORDER BY plan_time_id"
+            ),
+            "medication_schedules": (
+                "SELECT * FROM medication_schedules ORDER BY schedule_id"
+            ),
+            "medication_times": (
+                "SELECT * FROM medication_times "
+                "ORDER BY medication_time_id"
+            ),
+            "medication_schedule_plan_times": (
+                "SELECT * FROM medication_schedule_plan_times "
+                "ORDER BY schedule_id, plan_time_id"
+            ),
+        }
+
+        with self.test_engine.connect() as connection:
+            return {
+                table_name: connection.execute(text(query)).all()
+                for table_name, query in queries.items()
+            }
+
+    def _insert_occurrence(
+        self,
+        *,
+        occurrence_id,
+        schedule_id=101,
+        scheduled_for="2026-10-08 08:00:00.000000",
+        response_status=None,
+        responded_at=None,
+    ):
+        timestamp = "2026-10-08 00:00:00.000000"
+
+        with self.test_engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO medication_occurrences ("
+                    "occurrence_id, schedule_id, scheduled_for, "
+                    "response_status, responded_at, created_at, updated_at"
+                    ") VALUES ("
+                    ":occurrence_id, :schedule_id, :scheduled_for, "
+                    ":response_status, :responded_at, :created_at, "
+                    ":updated_at)"
+                ),
+                {
+                    "occurrence_id": occurrence_id,
+                    "schedule_id": schedule_id,
+                    "scheduled_for": scheduled_for,
+                    "response_status": response_status,
+                    "responded_at": responded_at,
+                    "created_at": timestamp,
+                    "updated_at": timestamp,
+                },
+            )
+
+    def test_medication_occurrence_model_metadata(self):
+        table = MedicationOccurrence.__table__
+
+        self.assertEqual(table.name, "medication_occurrences")
+        self.assertTrue(table.c.scheduled_for.type.timezone)
+        self.assertTrue(table.c.responded_at.type.timezone)
+        self.assertTrue(table.c.created_at.type.timezone)
+        self.assertTrue(table.c.updated_at.type.timezone)
+        self.assertIsNotNone(table.c.created_at.default)
+        self.assertIsNotNone(table.c.updated_at.default)
+        self.assertIsNotNone(table.c.updated_at.onupdate)
+        self.assertEqual(MedicationOccurrence.schedule.property.lazy, "select")
+        self.assertEqual(MedicationSchedule.occurrences.property.lazy, "select")
+
+    def test_occurrence_migration_round_trip_preserves_existing_data(self):
+        self._upgrade_to_schedule_setup_removal_revision()
+        self._seed_occurrence_migration_data()
+        rows_before = self._read_occurrence_migration_rows()
+        self._assert_database_is_healthy()
+
+        self._upgrade_to_new_head()
+        self.assertEqual(self._read_occurrence_migration_rows(), rows_before)
+        with self.test_engine.connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    text("SELECT COUNT(*) FROM medication_occurrences")
+                ).scalar_one(),
+                0,
+            )
+        self._assert_database_is_healthy()
+        check(directory=MIGRATIONS_DIRECTORY)
+
+        downgrade(
+            directory=MIGRATIONS_DIRECTORY,
+            revision=SCHEDULE_SETUP_REMOVAL_REVISION,
+        )
+        self.assertNotIn(
+            "medication_occurrences",
+            inspect(self.test_engine).get_table_names(),
+        )
+        self.assertEqual(self._read_occurrence_migration_rows(), rows_before)
+        self._assert_database_is_healthy()
+
+        self._upgrade_to_new_head()
+        self.assertEqual(self._read_occurrence_migration_rows(), rows_before)
+        with self.test_engine.connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    text("SELECT COUNT(*) FROM medication_occurrences")
+                ).scalar_one(),
+                0,
+            )
+        self._assert_database_is_healthy()
+
+    def test_occurrence_schema_constraints_and_indexes(self):
+        self._upgrade_to_new_head()
+        inspector = inspect(self.test_engine)
+        columns = {
+            value["name"]: value
+            for value in inspector.get_columns("medication_occurrences")
+        }
+
+        self.assertEqual(
+            tuple(columns),
+            (
+                "occurrence_id",
+                "schedule_id",
+                "scheduled_for",
+                "response_status",
+                "responded_at",
+                "created_at",
+                "updated_at",
+            ),
+        )
+        self.assertFalse(columns["schedule_id"]["nullable"])
+        self.assertFalse(columns["scheduled_for"]["nullable"])
+        self.assertTrue(columns["response_status"]["nullable"])
+        self.assertTrue(columns["responded_at"]["nullable"])
+        self.assertFalse(columns["created_at"]["nullable"])
+        self.assertFalse(columns["updated_at"]["nullable"])
+
+        self.assertEqual(
+            inspector.get_pk_constraint("medication_occurrences")[
+                "constrained_columns"
+            ],
+            ["occurrence_id"],
+        )
+        self.assertEqual(
+            {
+                (value["name"], tuple(value["column_names"]))
+                for value in inspector.get_unique_constraints(
+                    "medication_occurrences"
+                )
+            },
+            {
+                (
+                    "uq_medication_occurrence_schedule_scheduled_for",
+                    ("schedule_id", "scheduled_for"),
+                )
+            },
+        )
+        self.assertEqual(
+            {
+                (
+                    value["name"],
+                    tuple(value["column_names"]),
+                    bool(value["unique"]),
+                )
+                for value in inspector.get_indexes("medication_occurrences")
+            },
+            {
+                (
+                    "ix_medication_occurrences_scheduled_for",
+                    ("scheduled_for",),
+                    False,
+                )
+            },
+        )
+        self.assertEqual(
+            {
+                (
+                    value["name"],
+                    tuple(value["constrained_columns"]),
+                    value["referred_table"],
+                    tuple(value["referred_columns"]),
+                    value.get("options", {}).get("ondelete"),
+                )
+                for value in inspector.get_foreign_keys(
+                    "medication_occurrences"
+                )
+            },
+            {
+                (
+                    "fk_medication_occurrence_schedule",
+                    ("schedule_id",),
+                    "medication_schedules",
+                    ("schedule_id",),
+                    "RESTRICT",
+                )
+            },
+        )
+        self.assertEqual(
+            {
+                value["name"]
+                for value in inspector.get_check_constraints(
+                    "medication_occurrences"
+                )
+            },
+            {
+                "ck_medication_occurrence_response_status",
+                "ck_medication_occurrence_response_timestamp",
+            },
+        )
+
+    def test_occurrence_response_and_integrity_constraints(self):
+        self._upgrade_to_schedule_setup_removal_revision()
+        self._seed_occurrence_migration_data()
+        self._upgrade_to_new_head()
+        response_time = "2026-10-08 08:05:00.000000"
+
+        self._insert_occurrence(occurrence_id=1)
+        self._insert_occurrence(
+            occurrence_id=2,
+            scheduled_for="2026-10-08 09:00:00.000000",
+            response_status="taken",
+            responded_at=response_time,
+        )
+        self._insert_occurrence(
+            occurrence_id=3,
+            scheduled_for="2026-10-08 10:00:00.000000",
+            response_status="not_taken",
+            responded_at=response_time,
+        )
+
+        invalid_values = (
+            {
+                "occurrence_id": 4,
+                "scheduled_for": "2026-10-08 11:00:00.000000",
+                "response_status": "invalid",
+                "responded_at": response_time,
+            },
+            {
+                "occurrence_id": 5,
+                "scheduled_for": "2026-10-08 12:00:00.000000",
+                "response_status": "taken",
+            },
+            {
+                "occurrence_id": 6,
+                "scheduled_for": "2026-10-08 13:00:00.000000",
+                "responded_at": response_time,
+            },
+            {
+                "occurrence_id": 7,
+                "scheduled_for": "2026-10-08 08:00:00.000000",
+            },
+            {
+                "occurrence_id": 8,
+                "schedule_id": 999_999,
+                "scheduled_for": "2026-10-08 14:00:00.000000",
+            },
+        )
+        for values in invalid_values:
+            with self.subTest(values=values):
+                with self.assertRaises(IntegrityError):
+                    self._insert_occurrence(**values)
+
+        self._insert_occurrence(
+            occurrence_id=9,
+            schedule_id=102,
+            scheduled_for="2026-10-08 08:00:00.000000",
+        )
+        with self.assertRaises(IntegrityError):
+            with self.test_engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "DELETE FROM medication_schedules "
+                        "WHERE schedule_id = 102"
+                    )
+                )
+
+        with self.test_engine.connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    text(
+                        "SELECT occurrence_id, response_status, "
+                        "responded_at FROM medication_occurrences "
+                        "ORDER BY occurrence_id"
+                    )
+                ).all(),
+                [
+                    (1, None, None),
+                    (2, "taken", response_time),
+                    (3, "not_taken", response_time),
+                    (9, None, None),
+                ],
+            )
+            self.assertEqual(
+                connection.execute(
+                    text(
+                        "SELECT COUNT(*) FROM medication_schedules "
+                        "WHERE schedule_id = 102"
+                    )
+                ).scalar_one(),
+                1,
+            )
+        self._assert_database_is_healthy()
 
     def test_upgrade_is_additive_and_preserves_legacy_rows(self):
         self._upgrade_to_new_head()

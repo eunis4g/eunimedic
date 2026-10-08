@@ -590,6 +590,77 @@ class MedicationSchedule(db.Model):
         passive_deletes=True,
         overlaps="plan_time,schedule_links",
     )
+    occurrences = db.relationship(
+        "MedicationOccurrence",
+        back_populates="schedule",
+        passive_deletes=True,
+    )
+
+
+class MedicationOccurrence(db.Model):
+    __tablename__ = "medication_occurrences"
+
+    occurrence_id = db.Column(db.Integer, primary_key=True)
+    schedule_id = db.Column(
+        db.Integer,
+        db.ForeignKey(
+            "medication_schedules.schedule_id",
+            name="fk_medication_occurrence_schedule",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    # Invariant: normalize this canonical instant to UTC before storing it.
+    scheduled_for = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+    )
+    response_status = db.Column(
+        db.String(16),
+        nullable=True,
+    )
+    responded_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=True,
+    )
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=utc_now,
+    )
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=utc_now,
+        onupdate=utc_now,
+    )
+
+    __table_args__ = (
+        db.CheckConstraint(
+            "response_status IS NULL OR "
+            "response_status IN ('taken', 'not_taken')",
+            name="ck_medication_occurrence_response_status",
+        ),
+        db.CheckConstraint(
+            "(response_status IS NULL AND responded_at IS NULL) OR "
+            "(response_status IS NOT NULL AND responded_at IS NOT NULL)",
+            name="ck_medication_occurrence_response_timestamp",
+        ),
+        db.UniqueConstraint(
+            "schedule_id",
+            "scheduled_for",
+            name="uq_medication_occurrence_schedule_scheduled_for",
+        ),
+        db.Index(
+            "ix_medication_occurrences_scheduled_for",
+            "scheduled_for",
+        ),
+    )
+
+    schedule = db.relationship(
+        "MedicationSchedule",
+        back_populates="occurrences",
+    )
 
 
 class MedicationTime(db.Model):
