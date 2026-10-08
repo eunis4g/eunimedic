@@ -337,6 +337,107 @@ def generate_future_occurrences(
     return tuple(occurrences)
 
 
+def generate_occurrences_in_window(
+    *,
+    start_date: date,
+    course_days: int,
+    times: Iterable[time],
+    reported_doses_taken_before_tracking: int,
+    accounted_occurrence_count: int,
+    reminder_tracking_started_at: datetime,
+    window_start: datetime,
+    window_end: datetime,
+    timezone_name: str,
+) -> tuple[datetime, ...]:
+    """Return capacity-limited slots in the UTC window [start, end)."""
+
+    normalized_times = normalize_medication_times(times)
+    window_start_utc = _normalize_aware_datetime(
+        "window_start",
+        window_start,
+    )
+    window_end_utc = _normalize_aware_datetime(
+        "window_end",
+        window_end,
+    )
+
+    if window_start_utc >= window_end_utc:
+        raise MedicationScheduleCalculationError(
+            "window_start must be earlier than window_end."
+        )
+
+    summary = calculate_occurrence_summary(
+        start_date=start_date,
+        course_days=course_days,
+        times=normalized_times,
+        reported_doses_taken_before_tracking=(
+            reported_doses_taken_before_tracking
+        ),
+        accounted_occurrence_count=accounted_occurrence_count,
+        reminder_tracking_started_at=reminder_tracking_started_at,
+        reference_at=window_start_utc,
+        timezone_name=timezone_name,
+    )
+
+    if summary.remaining == 0:
+        return ()
+
+    normalized_start_date = _validate_start_date(start_date)
+    tracking_utc = _normalize_aware_datetime(
+        "reminder_tracking_started_at",
+        reminder_tracking_started_at,
+    )
+    timezone = _load_timezone(timezone_name)
+    segment_start_utc = _calculate_segment_start_utc(
+        start_date=normalized_start_date,
+        tracking_utc=tracking_utc,
+        timezone=timezone,
+    )
+    bounded_start_utc = max(segment_start_utc, window_start_utc)
+
+    if bounded_start_utc >= window_end_utc:
+        return ()
+
+    first_local_date = bounded_start_utc.astimezone(timezone).date()
+    last_local_date = (
+        window_end_utc - timedelta(microseconds=1)
+    ).astimezone(timezone).date()
+    day_span = (last_local_date - first_local_date).days + 1
+
+    if day_span > MAX_SCANNED_DAYS:
+        raise MedicationScheduleCalculationError(
+            "The occurrence window is too large to calculate safely in "
+            "one request."
+        )
+
+    occurrences = []
+    cursor_date = first_local_date
+
+    while cursor_date <= last_local_date:
+        for occurrence in _occurrences_for_local_date(
+            local_date=cursor_date,
+            times=normalized_times,
+            timezone=timezone,
+        ):
+            occurrence_utc = occurrence.astimezone(UTC)
+
+            if bounded_start_utc <= occurrence_utc < window_end_utc:
+                if len(occurrences) >= MAX_MATERIALIZED_OCCURRENCES:
+                    raise MedicationScheduleCalculationError(
+                        "Too many occurrences were requested for one "
+                        "materialized result."
+                    )
+
+                occurrences.append(occurrence)
+
+                if len(occurrences) == summary.remaining:
+                    return tuple(occurrences)
+
+        cursor_date = _next_date(cursor_date)
+
+    return tuple(occurrences)
+
+
 def calculate_last_scheduled_occurrence(
     *,
     start_date: date,
