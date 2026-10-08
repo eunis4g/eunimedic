@@ -30,6 +30,7 @@ from services.notification_worker_service import (
     _finalize_sent,
     _prepare_claimed_dispatch,
     process_due_scheduled_notifications,
+    recover_stale_notification_claims,
 )
 
 
@@ -190,6 +191,30 @@ class NotificationWorkerServiceTest(unittest.TestCase):
         }
         arguments.update(overrides)
         return process_due_scheduled_notifications(db.session, **arguments)
+
+    def mark_claimed(
+        self,
+        dispatch,
+        *,
+        claimed_at,
+        claim_token="stale-claim-token",
+    ):
+        db.session.execute(
+            update(NotificationDispatch)
+            .where(
+                NotificationDispatch.dispatch_id == dispatch.dispatch_id
+            )
+            .values(
+                status="claimed",
+                claim_token=claim_token,
+                claimed_at=claimed_at,
+                updated_at=claimed_at,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        db.session.commit()
+        db.session.refresh(dispatch)
+        return dispatch
 
     def test_due_dispatch_is_sent_outside_a_database_transaction(self):
         schedule = self.add_schedule()
@@ -527,6 +552,457 @@ class NotificationWorkerServiceTest(unittest.TestCase):
                 action_time=utc_datetime(2026, 10, 8, 1, 5),
                 batch_size=0,
             )
+
+    def test_stale_claim_recovery_is_caller_committed(self):
+        schedule = self.add_schedule()
+        dispatch, _ = self.add_notification(schedule)
+        self.mark_claimed(
+            dispatch,
+            claimed_at=utc_datetime(2026, 10, 8),
+        )
+
+        result = recover_stale_notification_claims(
+            db.session,
+            action_time=utc_datetime(2026, 10, 8, 1),
+            claim_timeout=timedelta(minutes=30),
+        )
+
+        self.assertEqual(result.recovered_count, 1)
+        self.assertTrue(db.session().in_transaction())
+        with Session(self.test_engine) as observer:
+            observed = observer.get(
+                NotificationDispatch,
+                dispatch.dispatch_id,
+            )
+            self.assertEqual(observed.status, "claimed")
+
+        db.session.commit()
+        db.session.refresh(dispatch)
+        self.assertEqual(dispatch.status, "pending")
+        self.assertIsNone(dispatch.claim_token)
+        self.assertIsNone(dispatch.claimed_at)
+        self.assertEqual(
+            stored_as_utc(dispatch.updated_at),
+            utc_datetime(2026, 10, 8, 1),
+        )
+
+    def test_stale_cutoff_is_strict_and_half_open(self):
+        schedule = self.add_schedule(time(10), time(11), time(12))
+        stale, _ = self.add_notification(
+            schedule,
+            due_at=utc_datetime(2026, 10, 8, 1),
+        )
+        exact_cutoff, _ = self.add_notification(
+            schedule,
+            due_at=utc_datetime(2026, 10, 8, 2),
+        )
+        fresh, _ = self.add_notification(
+            schedule,
+            due_at=utc_datetime(2026, 10, 8, 3),
+        )
+        self.mark_claimed(
+            stale,
+            claimed_at=utc_datetime(2026, 10, 8, 1, 59),
+        )
+        self.mark_claimed(
+            exact_cutoff,
+            claimed_at=utc_datetime(2026, 10, 8, 2),
+        )
+        self.mark_claimed(
+            fresh,
+            claimed_at=utc_datetime(2026, 10, 8, 2, 1),
+        )
+
+        result = recover_stale_notification_claims(
+            db.session,
+            action_time=utc_datetime(2026, 10, 8, 3),
+            claim_timeout=timedelta(hours=1),
+        )
+        db.session.commit()
+        db.session.expire_all()
+
+        self.assertEqual(result.recovered_count, 1)
+        self.assertEqual(
+            db.session.get(NotificationDispatch, stale.dispatch_id).status,
+            "pending",
+        )
+        self.assertEqual(
+            db.session.get(
+                NotificationDispatch,
+                exact_cutoff.dispatch_id,
+            ).status,
+            "claimed",
+        )
+        self.assertEqual(
+            db.session.get(NotificationDispatch, fresh.dispatch_id).status,
+            "claimed",
+        )
+
+    def test_recovery_does_not_change_non_claimed_statuses(self):
+        schedule = self.add_schedule(time(10), time(11), time(12), time(13))
+        dispatches = [
+            self.add_notification(
+                schedule,
+                due_at=utc_datetime(2026, 10, 8, hour),
+            )[0]
+            for hour in (1, 2, 3, 4)
+        ]
+        db.session.execute(
+            update(NotificationDispatch)
+            .where(
+                NotificationDispatch.dispatch_id == dispatches[1].dispatch_id
+            )
+            .values(
+                status="sent",
+                sent_at=utc_datetime(2026, 10, 8, 2, 5),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        for dispatch, status in zip(dispatches[2:], ("failed", "canceled")):
+            db.session.execute(
+                update(NotificationDispatch)
+                .where(
+                    NotificationDispatch.dispatch_id == dispatch.dispatch_id
+                )
+                .values(status=status)
+                .execution_options(synchronize_session=False)
+            )
+        db.session.commit()
+
+        result = recover_stale_notification_claims(
+            db.session,
+            action_time=utc_datetime(2026, 10, 9),
+            claim_timeout=timedelta(minutes=1),
+        )
+        db.session.commit()
+        db.session.expire_all()
+
+        self.assertEqual(result.recovered_count, 0)
+        self.assertEqual(
+            [
+                db.session.get(
+                    NotificationDispatch,
+                    dispatch.dispatch_id,
+                ).status
+                for dispatch in dispatches
+            ],
+            ["pending", "sent", "failed", "canceled"],
+        )
+
+    def test_recovery_skips_malformed_claim_invariants(self):
+        schedule = self.add_schedule(time(10), time(11))
+        missing_token, _ = self.add_notification(
+            schedule,
+            due_at=utc_datetime(2026, 10, 8, 1),
+        )
+        missing_claimed_at, _ = self.add_notification(
+            schedule,
+            due_at=utc_datetime(2026, 10, 8, 2),
+        )
+        db.session.execute(text("PRAGMA ignore_check_constraints=ON"))
+        try:
+            db.session.execute(
+                update(NotificationDispatch)
+                .where(
+                    NotificationDispatch.dispatch_id
+                    == missing_token.dispatch_id
+                )
+                .values(
+                    status="claimed",
+                    claim_token=None,
+                    claimed_at=utc_datetime(2026, 10, 7),
+                )
+                .execution_options(synchronize_session=False)
+            )
+            db.session.execute(
+                update(NotificationDispatch)
+                .where(
+                    NotificationDispatch.dispatch_id
+                    == missing_claimed_at.dispatch_id
+                )
+                .values(
+                    status="claimed",
+                    claim_token="token",
+                    claimed_at=None,
+                )
+                .execution_options(synchronize_session=False)
+            )
+            db.session.commit()
+
+            result = recover_stale_notification_claims(
+                db.session,
+                action_time=utc_datetime(2026, 10, 9),
+                claim_timeout=timedelta(minutes=1),
+            )
+            db.session.commit()
+        finally:
+            db.session.execute(text("PRAGMA ignore_check_constraints=OFF"))
+            db.session.commit()
+
+        self.assertEqual(result.recovered_count, 0)
+        db.session.refresh(missing_token)
+        db.session.refresh(missing_claimed_at)
+        self.assertEqual(missing_token.status, "claimed")
+        self.assertEqual(missing_claimed_at.status, "claimed")
+
+    def test_recovery_preserves_delivery_and_domain_data(self):
+        schedule = self.add_schedule()
+        dispatch, occurrence = self.add_notification(
+            schedule,
+            attempt_count=2,
+            next_attempt_at=utc_datetime(2026, 10, 8, 1, 30),
+        )
+        db.session.execute(
+            update(NotificationDispatch)
+            .where(
+                NotificationDispatch.dispatch_id == dispatch.dispatch_id
+            )
+            .values(last_error_code="smtp_timeout")
+            .execution_options(synchronize_session=False)
+        )
+        db.session.commit()
+        self.mark_claimed(
+            dispatch,
+            claimed_at=utc_datetime(2026, 10, 8),
+        )
+        member_keys = [
+            (member.dispatch_id, member.occurrence_id)
+            for member in dispatch.members
+        ]
+        occurrence_state = (
+            occurrence.response_status,
+            occurrence.responded_at,
+            occurrence.updated_at,
+        )
+        schedule_state = (
+            schedule.updated_at,
+            schedule.accounted_occurrence_count,
+        )
+
+        result = recover_stale_notification_claims(
+            db.session,
+            action_time=utc_datetime(2026, 10, 8, 2),
+            claim_timeout=timedelta(minutes=30),
+        )
+        db.session.commit()
+        db.session.refresh(dispatch)
+        db.session.refresh(occurrence)
+        db.session.refresh(schedule)
+
+        self.assertEqual(result.recovered_count, 1)
+        self.assertEqual(dispatch.attempt_count, 2)
+        self.assertEqual(
+            stored_as_utc(dispatch.next_attempt_at),
+            utc_datetime(2026, 10, 8, 1, 30),
+        )
+        self.assertEqual(dispatch.last_error_code, "smtp_timeout")
+        self.assertIsNone(dispatch.sent_at)
+        self.assertEqual(
+            [
+                (member.dispatch_id, member.occurrence_id)
+                for member in dispatch.members
+            ],
+            member_keys,
+        )
+        self.assertEqual(
+            (
+                occurrence.response_status,
+                occurrence.responded_at,
+                occurrence.updated_at,
+            ),
+            occurrence_state,
+        )
+        self.assertEqual(
+            (schedule.updated_at, schedule.accounted_occurrence_count),
+            schedule_state,
+        )
+
+    def test_recovery_handles_multiple_stale_rows_in_one_update(self):
+        schedule = self.add_schedule(time(10), time(11), time(12))
+        dispatches = [
+            self.add_notification(
+                schedule,
+                due_at=utc_datetime(2026, 10, 8, hour),
+            )[0]
+            for hour in (1, 2, 3)
+        ]
+        self.mark_claimed(
+            dispatches[0],
+            claimed_at=utc_datetime(2026, 10, 8),
+        )
+        self.mark_claimed(
+            dispatches[1],
+            claimed_at=utc_datetime(2026, 10, 8, 0, 1),
+        )
+        self.mark_claimed(
+            dispatches[2],
+            claimed_at=utc_datetime(2026, 10, 8, 1, 50),
+        )
+
+        result = recover_stale_notification_claims(
+            db.session,
+            action_time=utc_datetime(2026, 10, 8, 2),
+            claim_timeout=timedelta(minutes=30),
+        )
+        db.session.commit()
+        db.session.expire_all()
+
+        self.assertEqual(result.recovered_count, 2)
+        self.assertEqual(
+            [
+                db.session.get(
+                    NotificationDispatch,
+                    dispatch.dispatch_id,
+                ).status
+                for dispatch in dispatches
+            ],
+            ["pending", "pending", "claimed"],
+        )
+
+    def test_recovery_validates_action_time_and_timeout(self):
+        invalid_arguments = (
+            {
+                "action_time": datetime(2026, 10, 8, 1),
+                "claim_timeout": timedelta(minutes=1),
+            },
+            {
+                "action_time": utc_datetime(2026, 10, 8, 1),
+                "claim_timeout": timedelta(0),
+            },
+            {
+                "action_time": utc_datetime(2026, 10, 8, 1),
+                "claim_timeout": timedelta(minutes=-1),
+            },
+        )
+
+        for arguments in invalid_arguments:
+            with self.subTest(arguments=arguments):
+                with self.assertRaises(NotificationWorkerError):
+                    recover_stale_notification_claims(
+                        db.session,
+                        **arguments,
+                    )
+
+    def test_recovery_is_generic_across_notification_types(self):
+        schedule = self.add_schedule()
+        dispatch, _ = self.add_notification(
+            schedule,
+            notification_type="unanswered_review",
+        )
+        self.mark_claimed(
+            dispatch,
+            claimed_at=utc_datetime(2026, 10, 8),
+        )
+
+        result = recover_stale_notification_claims(
+            db.session,
+            action_time=utc_datetime(2026, 10, 8, 1),
+            claim_timeout=timedelta(minutes=30),
+        )
+        db.session.commit()
+        db.session.refresh(dispatch)
+
+        self.assertEqual(result.recovered_count, 1)
+        self.assertEqual(dispatch.status, "pending")
+
+    def test_recovered_dispatch_can_be_claimed_and_sent_by_worker(self):
+        schedule = self.add_schedule()
+        dispatch, _ = self.add_notification(schedule)
+        self.mark_claimed(
+            dispatch,
+            claimed_at=utc_datetime(2026, 10, 8),
+        )
+
+        recovery = recover_stale_notification_claims(
+            db.session,
+            action_time=utc_datetime(2026, 10, 8, 1, 5),
+            claim_timeout=timedelta(minutes=30),
+        )
+        db.session.commit()
+        sent_messages = []
+        summary = self.run_worker(
+            lambda **message: sent_messages.append(message)
+        )
+        db.session.refresh(dispatch)
+
+        self.assertEqual(recovery.recovered_count, 1)
+        self.assertEqual(summary.claimed_count, 1)
+        self.assertEqual(summary.sent_count, 1)
+        self.assertEqual(len(sent_messages), 1)
+        self.assertEqual(dispatch.status, "sent")
+
+    def test_recovery_never_calls_smtp_or_reprocesses_sent_dispatch(self):
+        schedule = self.add_schedule()
+        dispatch, _ = self.add_notification(schedule)
+        self.mark_claimed(
+            dispatch,
+            claimed_at=utc_datetime(2026, 10, 8),
+        )
+
+        with patch(
+            "services.notification_worker_service.send_email"
+        ) as smtp_sender:
+            first = recover_stale_notification_claims(
+                db.session,
+                action_time=utc_datetime(2026, 10, 8, 1),
+                claim_timeout=timedelta(minutes=30),
+            )
+            db.session.commit()
+            smtp_sender.assert_not_called()
+
+        self.run_worker(lambda **message: message["message_id"])
+        second = recover_stale_notification_claims(
+            db.session,
+            action_time=utc_datetime(2026, 10, 9),
+            claim_timeout=timedelta(minutes=1),
+        )
+        db.session.commit()
+        db.session.refresh(dispatch)
+
+        self.assertEqual(first.recovered_count, 1)
+        self.assertEqual(second.recovered_count, 0)
+        self.assertEqual(dispatch.status, "sent")
+
+    def test_concurrent_recovery_is_idempotent_before_worker_claim(self):
+        schedule = self.add_schedule()
+        dispatch, _ = self.add_notification(schedule)
+        self.mark_claimed(
+            dispatch,
+            claimed_at=utc_datetime(2026, 10, 8),
+        )
+        action_time = utc_datetime(2026, 10, 8, 1)
+
+        with Session(self.test_engine) as first_session:
+            first = recover_stale_notification_claims(
+                first_session,
+                action_time=action_time,
+                claim_timeout=timedelta(minutes=30),
+            )
+            first_session.commit()
+
+        with Session(self.test_engine) as second_session:
+            second = recover_stale_notification_claims(
+                second_session,
+                action_time=action_time,
+                claim_timeout=timedelta(minutes=30),
+            )
+            second_session.commit()
+
+        with Session(self.test_engine) as worker_session:
+            claimed = _claim_dispatch(
+                worker_session,
+                dispatch_id=dispatch.dispatch_id,
+                claim_token="worker-token",
+                claim_time=action_time,
+            )
+
+        db.session.expire_all()
+        current = db.session.get(NotificationDispatch, dispatch.dispatch_id)
+        self.assertEqual(first.recovered_count, 1)
+        self.assertEqual(second.recovered_count, 0)
+        self.assertTrue(claimed)
+        self.assertEqual(current.status, "claimed")
+        self.assertEqual(current.claim_token, "worker-token")
 
 
 class EmailServiceGeneralizationTest(unittest.TestCase):

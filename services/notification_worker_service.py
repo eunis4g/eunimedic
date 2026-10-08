@@ -58,6 +58,11 @@ class ScheduledNotificationDeliverySummary:
 
 
 @dataclass(frozen=True)
+class StaleNotificationClaimRecoveryResult:
+    recovered_count: int
+
+
+@dataclass(frozen=True)
 class _PreparedDelivery:
     dispatch_id: int
     claim_token: str
@@ -84,6 +89,61 @@ def _rollback_session_on_error(function):
             raise
 
     return wrapped
+
+
+def recover_stale_notification_claims(
+    session,
+    *,
+    action_time: datetime,
+    claim_timeout: timedelta,
+) -> StaleNotificationClaimRecoveryResult:
+    """Return expired claim leases to pending without committing.
+
+    The caller owns commit and rollback. Delivery attempt metadata and member
+    rows remain unchanged so the normal worker can revalidate them after it
+    acquires a new claim.
+    """
+
+    action_time_utc = _normalize_worker_instant(
+        action_time,
+        name="action_time",
+    )
+
+    if (
+        not isinstance(claim_timeout, timedelta)
+        or claim_timeout <= timedelta(0)
+    ):
+        raise NotificationWorkerError(
+            "claim_timeout must be a positive datetime.timedelta value."
+        )
+
+    try:
+        stale_before = action_time_utc - claim_timeout
+    except OverflowError as error:
+        raise NotificationWorkerError(
+            "The stale claim cutoff is outside the supported datetime range."
+        ) from error
+
+    result = session.execute(
+        update(NotificationDispatch)
+        .where(
+            NotificationDispatch.status == CLAIMED_DISPATCH_STATUS,
+            NotificationDispatch.claim_token.is_not(None),
+            NotificationDispatch.claimed_at.is_not(None),
+            NotificationDispatch.claimed_at < stale_before,
+            NotificationDispatch.sent_at.is_(None),
+        )
+        .values(
+            status=PENDING_DISPATCH_STATUS,
+            claim_token=None,
+            claimed_at=None,
+            updated_at=action_time_utc,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    return StaleNotificationClaimRecoveryResult(
+        recovered_count=result.rowcount or 0
+    )
 
 
 @_rollback_session_on_error
