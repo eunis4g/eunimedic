@@ -1760,6 +1760,281 @@ def remove_medication_from_plan(schedule_id):
     return redirect(url_for("my_medication_plan"))
 
 
+@app.route(
+    "/medication-schedules/<int:schedule_id>/times/remove",
+    methods=["GET", "POST"],
+)
+@login_required
+def remove_medication_schedule_times(schedule_id):
+
+    schedule = get_owned_editable_plan_schedule(schedule_id)
+    plan = schedule.plan
+    plan_times = get_medication_plan_times(plan.plan_id)
+    plan_times_by_id = {
+        plan_time.plan_time_id: plan_time
+        for plan_time in plan_times
+    }
+    current_time_ids = get_plan_schedule_selected_time_ids(
+        schedule,
+        plan_times,
+    )
+
+    if current_time_ids is None:
+        flash(
+            "복용 일정의 시간 연결을 확인할 수 없습니다. "
+            "다시 시도해 주세요.",
+            "error",
+        )
+        return redirect(url_for("my_medication_plan"))
+
+    associated_plan_times = sorted(
+        (
+            plan_times_by_id[plan_time_id]
+            for plan_time_id in current_time_ids
+        ),
+        key=lambda plan_time: plan_time.time_of_day,
+    )
+    remove_time = utc_now()
+
+    try:
+        old_summary = calculate_stored_schedule_summary(
+            schedule,
+            reference_at=remove_time,
+            timezone_name=current_user.timezone,
+        )
+    except MedicationScheduleCalculationError:
+        flash(
+            "복용 일정 상태를 확인할 수 없습니다. "
+            "다시 시도해 주세요.",
+            "error",
+        )
+        return redirect(url_for("my_medication_plan"))
+
+    if old_summary.remaining == 0:
+        flash("이미 완료된 복용 일정입니다.", "info")
+        return redirect(url_for("my_medication_plan"))
+
+    if len(associated_plan_times) == 1:
+        flash(
+            "현재 시간이 하나뿐입니다. "
+            "전체 일정을 종료하려면 "
+            "'전체 일정 종료'를 사용해 주세요.",
+            "info",
+        )
+        return redirect(url_for("my_medication_plan"))
+
+    old_plan_updated_at = plan.updated_at
+    old_schedule_updated_at = schedule.updated_at
+    current_plan_version = serialize_medication_plan_version(
+        old_plan_updated_at
+    )
+    current_schedule_version = serialize_schedule_version(
+        old_schedule_updated_at
+    )
+
+    def render_remove_form(*, errors, selected_ids, status_code):
+        return (
+            render_template(
+                "medication_schedule_time_remove.html",
+                schedule=schedule,
+                plan_times=associated_plan_times,
+                plan_version=current_plan_version,
+                schedule_version=current_schedule_version,
+                selected_plan_time_ids=set(selected_ids),
+                errors=errors,
+            ),
+            status_code,
+        )
+
+    if request.method == "GET":
+        return render_remove_form(
+            errors=[],
+            selected_ids=[],
+            status_code=200,
+        )
+
+    if (
+        request.form.get("plan_version", "")
+        != current_plan_version
+        or request.form.get("schedule_version", "")
+        != current_schedule_version
+    ):
+        db.session.rollback()
+        flash(
+            "다른 요청에서 복용 일정이 변경되었습니다. "
+            "최신 내용을 확인해 주세요.",
+            "error",
+        )
+        return redirect(url_for("my_medication_plan"))
+
+    submitted_ids = request.form.getlist("plan_time_id")
+    parsed_ids = []
+    errors = []
+
+    if not submitted_ids:
+        errors.append("제거할 복용 시간을 하나 이상 선택해 주세요.")
+    else:
+        for submitted_id in submitted_ids:
+            normalized_id = submitted_id.strip()
+
+            if not normalized_id.isdigit() or int(normalized_id) < 1:
+                errors.append("선택한 복용 시간을 확인해 주세요.")
+                break
+
+            parsed_ids.append(int(normalized_id))
+
+        if not errors and len(parsed_ids) != len(set(parsed_ids)):
+            errors.append("같은 복용 시간을 중복해서 선택할 수 없습니다.")
+
+    current_time_id_set = set(current_time_ids)
+
+    if not errors and any(
+        plan_time_id not in current_time_id_set
+        for plan_time_id in parsed_ids
+    ):
+        errors.append("선택한 복용 시간을 확인해 주세요.")
+
+    if not errors and set(parsed_ids) == current_time_id_set:
+        errors.append(
+            "모든 시간을 제거하려면 "
+            "전체 일정 종료를 사용해 주세요."
+        )
+
+    if errors:
+        return render_remove_form(
+            errors=errors,
+            selected_ids=parsed_ids,
+            status_code=400,
+        )
+
+    removed_id_set = set(parsed_ids)
+    remaining_plan_times = [
+        plan_time
+        for plan_time in associated_plan_times
+        if plan_time.plan_time_id not in removed_id_set
+    ]
+    remaining_time_values = tuple(
+        plan_time.time_of_day
+        for plan_time in remaining_plan_times
+    )
+    new_accounted_occurrence_count = (
+        schedule.accounted_occurrence_count
+        + old_summary.elapsed_in_current_segment
+    )
+
+    try:
+        validate_plan_capacity(
+            times=remaining_time_values,
+            course_days=schedule.course_days,
+            reported_doses_taken_before_tracking=(
+                schedule.reported_doses_taken_before_tracking
+            ),
+            accounted_occurrence_count=(
+                new_accounted_occurrence_count
+            ),
+        )
+    except MedicationScheduleCalculationError:
+        return render_remove_form(
+            errors=[
+                "현재 기록된 일정 진행 상태 때문에 "
+                "이 시간을 제거할 수 없습니다. "
+                "복용 일정을 수정해 주세요."
+            ],
+            selected_ids=parsed_ids,
+            status_code=400,
+        )
+
+    try:
+        plan_claimed = claim_medication_plan_change(
+            plan,
+            old_updated_at=old_plan_updated_at,
+            action_time=remove_time,
+        )
+        schedule_claimed = False
+
+        if plan_claimed:
+            schedule_claimed = claim_medication_schedule_edit(
+                schedule,
+                old_updated_at=old_schedule_updated_at,
+                edit_time=remove_time,
+                deactivate=True,
+            )
+
+        if not plan_claimed or not schedule_claimed:
+            db.session.rollback()
+            flash(
+                "다른 요청에서 복용 일정이 변경되었습니다. "
+                "최신 내용을 확인해 주세요.",
+                "error",
+            )
+            return redirect(url_for("my_medication_plan"))
+
+        plan.updated_at = remove_time
+        schedule.is_active = False
+        schedule.closed_at = remove_time
+        schedule.updated_at = remove_time
+        db.session.flush()
+
+        new_schedule = MedicationSchedule(
+            user_medicine_id=schedule.user_medicine_id,
+            plan_id=schedule.plan_id,
+            intake_timing=schedule.intake_timing,
+            dose_amount_text=schedule.dose_amount_text,
+            dose_unit_text=schedule.dose_unit_text,
+            instructions=schedule.instructions,
+            start_date=schedule.start_date,
+            end_date=schedule.end_date,
+            course_days=schedule.course_days,
+            reported_doses_taken_before_tracking=(
+                schedule.reported_doses_taken_before_tracking
+            ),
+            reminder_tracking_started_at=remove_time,
+            accounted_occurrence_count=(
+                new_accounted_occurrence_count
+            ),
+            monday=schedule.monday,
+            tuesday=schedule.tuesday,
+            wednesday=schedule.wednesday,
+            thursday=schedule.thursday,
+            friday=schedule.friday,
+            saturday=schedule.saturday,
+            sunday=schedule.sunday,
+            is_active=True,
+            closed_at=None,
+            supersedes_schedule_id=schedule.schedule_id,
+            created_at=remove_time,
+            updated_at=remove_time,
+        )
+        db.session.add(new_schedule)
+        db.session.flush()
+
+        new_schedule.times.extend(
+            MedicationTime(time_of_day=plan_time.time_of_day)
+            for plan_time in remaining_plan_times
+        )
+        db.session.add_all(
+            MedicationSchedulePlanTime(
+                plan_id=plan.plan_id,
+                schedule_id=new_schedule.schedule_id,
+                plan_time_id=plan_time.plan_time_id,
+            )
+            for plan_time in remaining_plan_times
+        )
+        db.session.flush()
+        db.session.commit()
+    except (IntegrityError, SQLAlchemyError):
+        db.session.rollback()
+        flash(
+            "복용 시간을 일정에서 제거하지 못했습니다. "
+            "최신 내용을 확인하고 다시 시도해 주세요.",
+            "error",
+        )
+        return redirect(url_for("my_medication_plan"))
+
+    flash("선택한 시간을 복용 일정에서 제거했습니다.", "success")
+    return redirect(url_for("my_medication_plan"))
+
+
 @app.route("/medication-plans", methods=["POST"])
 @login_required
 def create_medication_plan():

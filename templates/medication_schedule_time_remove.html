@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+    <meta charset="UTF-8">
+    <title>복용 시간 선택 제거</title>
+</head>
+
+<body>
+
+    <h1>복용 시간 선택 제거</h1>
+    <p>{{ schedule.user_medicine.medicine.item_name }}</p>
+
+    {% if errors %}
+        <section aria-label="입력 오류">
+            <ul>
+                {% for error in errors %}
+                    <li role="alert">{{ error }}</li>
+                {% endfor %}
+            </ul>
+        </section>
+    {% endif %}
+
+    <form method="POST">
+        <input
+            type="hidden"
+            name="csrf_token"
+            value="{{ csrf_token() }}"
+        >
+        <input
+            type="hidden"
+            name="plan_version"
+            value="{{ plan_version }}"
+        >
+        <input
+            type="hidden"
+            name="schedule_version"
+            value="{{ schedule_version }}"
+        >
+
+        <fieldset>
+            <legend>제거할 복용 시간을 선택하세요</legend>
+            <ul>
+                {% for plan_time in plan_times %}
+                    <li>
+                        <label>
+                            <input
+                                type="checkbox"
+                                name="plan_time_id"
+                                value="{{ plan_time.plan_time_id }}"
+                                {% if plan_time.plan_time_id in selected_plan_time_ids %}
+                                    checked
+                                {% endif %}
+                            >
+                            <time datetime="{{ plan_time.time_of_day.strftime('%H:%M') }}">
+                                {{ plan_time.time_of_day.strftime('%H:%M') }}
+                            </time>
+                        </label>
+                    </li>
+                {% endfor %}
+            </ul>
+        </fieldset>
+
+        <button type="submit">선택한 시간 제거</button>
+    </form>
+
+    <p>
+        <a href="{{ url_for('my_medication_plan') }}">
+            복용 일정으로 돌아가기
+        </a>
+    </p>
+
+</body>
+
+</html>

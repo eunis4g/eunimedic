@@ -44,6 +44,10 @@
                                 'edit_medication_schedule',
                                 schedule_id=schedule.schedule_id
                             ) }}">복용 일정 수정</a>
+                            <a href="{{ url_for(
+                                'remove_medication_schedule_times',
+                                schedule_id=schedule.schedule_id
+                            ) }}">시간 선택 제거</a>
                             <form
                                 method="POST"
                                 action="{{ url_for(
@@ -71,7 +75,7 @@
                                         schedule.schedule_id
                                     ] }}"
                                 >
-                                <button type="submit">일정에서 제거</button>
+                                <button type="submit">전체 일정 종료</button>
                             </form>
                         </li>
                     {% endfor %}
