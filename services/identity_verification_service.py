@@ -42,6 +42,7 @@ class IdentityVerificationServiceErrorCode(str, Enum):
     COMPLETION_CONFLICT = "COMPLETION_CONFLICT"
     SESSION_CONSUMED = "SESSION_CONSUMED"
     PROVIDER_UNAVAILABLE = "PROVIDER_UNAVAILABLE"
+    VERIFICATION_NOT_COMPLETED = "VERIFICATION_NOT_COMPLETED"
     VERIFICATION_FAILED = "VERIFICATION_FAILED"
     VERIFICATION_EXPIRED = "VERIFICATION_EXPIRED"
     INVALID_PROVIDER_RESPONSE = "INVALID_PROVIDER_RESPONSE"
@@ -62,6 +63,8 @@ _ERROR_MESSAGES = {
         "The identity verification session has already been consumed.",
     IdentityVerificationServiceErrorCode.PROVIDER_UNAVAILABLE:
         "The identity verification provider is unavailable.",
+    IdentityVerificationServiceErrorCode.VERIFICATION_NOT_COMPLETED:
+        "Identity verification is not completed yet.",
     IdentityVerificationServiceErrorCode.VERIFICATION_FAILED:
         "Identity verification failed.",
     IdentityVerificationServiceErrorCode.VERIFICATION_EXPIRED:
@@ -106,6 +109,9 @@ class IdentityVerificationClaimRecoveryResult:
 
 class _InvalidProviderResult(RuntimeError):
     pass
+
+
+_FAILURE_CODE_UNCHANGED = object()
 
 
 def start_identity_verification(
@@ -520,14 +526,14 @@ def _release_completion_claim(
     verification_session_id: str,
     claim_token: str,
     action_time: datetime,
-    failure_code: str | None = None,
+    failure_code=_FAILURE_CODE_UNCHANGED,
 ) -> bool:
     values = {
         "completion_claim_token": None,
         "completion_claimed_at": None,
         "updated_at": action_time,
     }
-    if failure_code is not None:
+    if failure_code is not _FAILURE_CODE_UNCHANGED:
         values["failure_code"] = failure_code
 
     result = session.execute(
@@ -559,6 +565,22 @@ def _handle_provider_completion_error(
     provider_error_code: IdentityVerificationProviderErrorCode,
 ):
     service_code = _service_code_for_provider_error(provider_error_code)
+
+    if (
+        service_code
+        is IdentityVerificationServiceErrorCode.VERIFICATION_NOT_COMPLETED
+    ):
+        if not _release_completion_claim(
+            session,
+            verification_session_id=verification_session_id,
+            claim_token=claim_token,
+            action_time=action_time,
+            failure_code=None,
+        ):
+            raise IdentityVerificationServiceError(
+                IdentityVerificationServiceErrorCode.COMPLETION_CONFLICT
+            )
+        raise IdentityVerificationServiceError(service_code) from None
 
     if service_code is IdentityVerificationServiceErrorCode.PROVIDER_UNAVAILABLE:
         if not _release_completion_claim(
@@ -929,6 +951,8 @@ def _service_code_for_provider_error(code):
             IdentityVerificationServiceErrorCode.PROVIDER_UNAVAILABLE,
         IdentityVerificationProviderErrorCode.INVALID_PROVIDER_RESPONSE:
             IdentityVerificationServiceErrorCode.INVALID_PROVIDER_RESPONSE,
+        IdentityVerificationProviderErrorCode.VERIFICATION_PENDING:
+            IdentityVerificationServiceErrorCode.VERIFICATION_NOT_COMPLETED,
         IdentityVerificationProviderErrorCode.VERIFICATION_FAILED:
             IdentityVerificationServiceErrorCode.VERIFICATION_FAILED,
         IdentityVerificationProviderErrorCode.VERIFICATION_EXPIRED:

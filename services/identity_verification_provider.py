@@ -11,6 +11,7 @@ class IdentityVerificationProviderName(str, Enum):
 class IdentityVerificationProviderErrorCode(str, Enum):
     PROVIDER_UNAVAILABLE = "PROVIDER_UNAVAILABLE"
     INVALID_PROVIDER_RESPONSE = "INVALID_PROVIDER_RESPONSE"
+    VERIFICATION_PENDING = "VERIFICATION_PENDING"
     VERIFICATION_FAILED = "VERIFICATION_FAILED"
     VERIFICATION_EXPIRED = "VERIFICATION_EXPIRED"
 
@@ -20,6 +21,8 @@ _ERROR_MESSAGES = {
         "The identity verification provider is unavailable.",
     IdentityVerificationProviderErrorCode.INVALID_PROVIDER_RESPONSE:
         "The identity verification provider returned an invalid response.",
+    IdentityVerificationProviderErrorCode.VERIFICATION_PENDING:
+        "Identity verification is not completed yet.",
     IdentityVerificationProviderErrorCode.VERIFICATION_FAILED:
         "Identity verification failed.",
     IdentityVerificationProviderErrorCode.VERIFICATION_EXPIRED:

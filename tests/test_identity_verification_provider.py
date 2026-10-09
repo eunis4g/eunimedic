@@ -166,6 +166,7 @@ class IdentityVerificationProviderContractTest(unittest.TestCase):
             {
                 "PROVIDER_UNAVAILABLE",
                 "INVALID_PROVIDER_RESPONSE",
+                "VERIFICATION_PENDING",
                 "VERIFICATION_FAILED",
                 "VERIFICATION_EXPIRED",
             },

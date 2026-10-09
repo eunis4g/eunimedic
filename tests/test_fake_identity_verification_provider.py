@@ -149,6 +149,11 @@ class FakeIdentityVerificationProviderTest(unittest.TestCase):
             IdentityVerificationProviderErrorCode.VERIFICATION_FAILED
         )
 
+    def test_verification_pending_can_be_simulated(self):
+        self._assert_verification_error(
+            IdentityVerificationProviderErrorCode.VERIFICATION_PENDING
+        )
+
     def test_verification_expired_can_be_simulated(self):
         self._assert_verification_error(
             IdentityVerificationProviderErrorCode.VERIFICATION_EXPIRED

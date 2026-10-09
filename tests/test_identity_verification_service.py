@@ -29,6 +29,7 @@ from services.identity_verification_service import (
     IdentityVerificationServiceErrorCode,
     _claim_completion,
     _finalize_verified_completion,
+    _handle_provider_completion_error,
     _release_completion_claim,
     complete_identity_verification,
     start_identity_verification,
@@ -690,6 +691,102 @@ class IdentityVerificationServiceTest(unittest.TestCase):
         self.assertEqual(result.status, "verified")
         self.assertIsNone(stored.failure_code)
         self.assertEqual(provider.get_call_count, 2)
+
+    def test_provider_pending_releases_claim_clears_failure_and_retries(self):
+        unavailable = IdentityVerificationProviderError(
+            IdentityVerificationProviderErrorCode.PROVIDER_UNAVAILABLE
+        )
+        pending = IdentityVerificationProviderError(
+            IdentityVerificationProviderErrorCode.VERIFICATION_PENDING
+        )
+        provider = self.make_provider(get_error=unavailable)
+        started = self.start(provider)
+
+        with self.assertRaises(IdentityVerificationServiceError):
+            self.complete(started, provider)
+        self.assertEqual(
+            self.get_session(started.verification_session_id).failure_code,
+            "provider_unavailable",
+        )
+
+        provider.get_error = pending
+        with self.assertRaises(IdentityVerificationServiceError) as context:
+            self.complete(
+                started,
+                provider,
+                claim_token=OTHER_CLAIM_TOKEN,
+            )
+
+        self.assertIs(
+            context.exception.code,
+            IdentityVerificationServiceErrorCode.VERIFICATION_NOT_COMPLETED,
+        )
+        stored = self.get_session(started.verification_session_id)
+        self.assertEqual(stored.status, "pending")
+        self.assertEqual(
+            stored.provider_transaction_id,
+            started.provider_transaction_id,
+        )
+        self.assertIsNone(stored.failure_code)
+        self.assertIsNone(stored.age_eligibility)
+        self.assertIsNone(stored.identity_subject_digest)
+        self.assertIsNone(stored.verified_at)
+        self.assertIsNone(stored.completion_claim_token)
+        self.assertIsNone(stored.completion_claimed_at)
+        self.assertEqual(
+            db.session.scalar(select(func.count()).select_from(User)),
+            0,
+        )
+        error_text = repr(context.exception)
+        self.assertNotIn(started.provider_transaction_id, error_text)
+        self.assertNotIn(OTHER_CLAIM_TOKEN, error_text)
+        self.assertNotIn("CE3102", error_text)
+
+        provider.get_error = None
+        result = self.complete(
+            started,
+            provider,
+            claim_token="c" * 32,
+        )
+
+        self.assertEqual(result.status, "verified")
+        self.assertEqual(provider.get_call_count, 3)
+
+    def test_provider_pending_cannot_release_another_owners_claim(self):
+        provider = self.make_provider()
+        started = self.start(provider)
+        claim_time = ACTION_TIME + timedelta(minutes=1)
+        self.assertTrue(
+            _claim_completion(
+                db.session,
+                verification_session_id=started.verification_session_id,
+                claim_token=CLAIM_TOKEN,
+                action_time=claim_time,
+            )
+        )
+
+        with self.assertRaises(IdentityVerificationServiceError) as context:
+            _handle_provider_completion_error(
+                db.session,
+                verification_session_id=started.verification_session_id,
+                claim_token=OTHER_CLAIM_TOKEN,
+                action_time=claim_time,
+                provider_error_code=(
+                    IdentityVerificationProviderErrorCode.VERIFICATION_PENDING
+                ),
+            )
+
+        self.assertIs(
+            context.exception.code,
+            IdentityVerificationServiceErrorCode.COMPLETION_CONFLICT,
+        )
+        stored = self.get_session(started.verification_session_id)
+        self.assertEqual(stored.status, "pending")
+        self.assertEqual(stored.completion_claim_token, CLAIM_TOKEN)
+        self.assertEqual(
+            stored_as_utc(stored.completion_claimed_at),
+            claim_time,
+        )
 
     def test_explicit_provider_failure_becomes_failed_and_releases_claim(self):
         provider = self.make_provider(

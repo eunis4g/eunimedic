@@ -74,6 +74,7 @@ class FakeIdentityVerificationProvider(IdentityVerificationProvider):
                 )
 
             if verification_error_code not in (
+                IdentityVerificationProviderErrorCode.VERIFICATION_PENDING,
                 IdentityVerificationProviderErrorCode.VERIFICATION_FAILED,
                 IdentityVerificationProviderErrorCode.VERIFICATION_EXPIRED,
             ):
