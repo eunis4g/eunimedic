@@ -87,6 +87,7 @@ class IdentityVerificationServiceError(RuntimeError):
 @dataclass(frozen=True)
 class IdentityVerificationSessionStartResult:
     verification_session_id: str
+    provider_transaction_id: str = field(repr=False)
     authentication_url: str = field(repr=False)
     expires_at: datetime
 
@@ -214,6 +215,7 @@ def start_identity_verification(
     session.commit()
     return IdentityVerificationSessionStartResult(
         verification_session_id=verification_session_id,
+        provider_transaction_id=provider_result.provider_transaction_id,
         authentication_url=provider_result.authentication_url,
         expires_at=expires_at,
     )

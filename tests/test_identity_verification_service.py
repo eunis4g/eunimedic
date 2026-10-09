@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import inspect
 import tempfile
 import unittest
 from datetime import UTC, date, datetime, timedelta
@@ -209,6 +210,10 @@ class IdentityVerificationServiceTest(unittest.TestCase):
             result.authentication_url,
             "fake://identity-verification/provider-transaction-1",
         )
+        self.assertEqual(
+            result.provider_transaction_id,
+            "provider-transaction-1",
+        )
         self.assertEqual(result.expires_at, ACTION_TIME + SESSION_TTL)
         self.assertEqual(stored.status, "pending")
         self.assertEqual(stored.provider, "toss")
@@ -217,13 +222,25 @@ class IdentityVerificationServiceTest(unittest.TestCase):
             stored.provider_transaction_id,
             "provider-transaction-1",
         )
+        self.assertEqual(
+            result.provider_transaction_id,
+            stored.provider_transaction_id,
+        )
         self.assertIsNone(stored.completion_claim_token)
         self.assertEqual(provider.start_call_count, 1)
         self.assertNotIn(
             "identity_verification_session_id",
             result.__dataclass_fields__,
         )
-        self.assertNotIn("provider_transaction_id", result.__dataclass_fields__)
+        self.assertEqual(
+            set(result.__dataclass_fields__),
+            {
+                "verification_session_id",
+                "provider_transaction_id",
+                "authentication_url",
+                "expires_at",
+            },
+        )
         self.assertNotIn("completion_claim_token", result.__dataclass_fields__)
         self.assertNotIn("identity_subject_digest", result.__dataclass_fields__)
         with self.test_engine.connect() as connection:
@@ -235,6 +252,13 @@ class IdentityVerificationServiceTest(unittest.TestCase):
                 )
             )
         self.assertNotIn(result.authentication_url, persisted_text)
+
+    def test_completion_does_not_accept_client_provider_transaction_id(self):
+        parameters = inspect.signature(
+            complete_identity_verification
+        ).parameters
+
+        self.assertNotIn("provider_transaction_id", parameters)
 
     def test_start_commits_session_before_provider_call(self):
         observations = []
@@ -839,10 +863,12 @@ class IdentityVerificationServiceTest(unittest.TestCase):
         provider = self.make_provider(identity_subject=subject)
         started = self.start(provider)
         authentication_url = started.authentication_url
+        provider_transaction_id = started.provider_transaction_id
         completed = self.complete(started, provider)
         stored = self.get_session(started.verification_session_id)
 
         self.assertNotIn(authentication_url, repr(started))
+        self.assertNotIn(provider_transaction_id, repr(started))
         self.assertNotIn(subject, repr(completed))
         self.assertNotIn(stored.identity_subject_digest, repr(completed))
         self.assertNotIn(stored.provider_transaction_id, repr(completed))
