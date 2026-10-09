@@ -22,6 +22,9 @@ from services.identity_verification_provider import (
     IdentityVerificationStartResult,
     VerifiedIdentityResult,
 )
+from services.identity_verification_evidence_writer import (
+    VerifiedIdentityEvidenceWriter,
+)
 
 
 ANDROID_REGISTRATION_PURPOSE = "android_registration"
@@ -47,6 +50,7 @@ class IdentityVerificationServiceErrorCode(str, Enum):
     VERIFICATION_FAILED = "VERIFICATION_FAILED"
     VERIFICATION_EXPIRED = "VERIFICATION_EXPIRED"
     INVALID_PROVIDER_RESPONSE = "INVALID_PROVIDER_RESPONSE"
+    FINALIZATION_FAILED = "FINALIZATION_FAILED"
 
 
 _ERROR_MESSAGES = {
@@ -74,6 +78,8 @@ _ERROR_MESSAGES = {
         "Identity verification expired.",
     IdentityVerificationServiceErrorCode.INVALID_PROVIDER_RESPONSE:
         "The identity verification provider returned an invalid response.",
+    IdentityVerificationServiceErrorCode.FINALIZATION_FAILED:
+        "Identity verification finalization failed.",
 }
 
 
@@ -238,6 +244,7 @@ def complete_identity_verification(
     action_time: datetime,
     identity_subject_hmac_key: bytes,
     claim_token_factory: Callable[[], str] | None = None,
+    evidence_writer: VerifiedIdentityEvidenceWriter | None = None,
 ) -> IdentityVerificationCompletionResult:
     """Claim, query, and finalize one identity verification session."""
 
@@ -349,6 +356,11 @@ def complete_identity_verification(
             provider_result,
             expected_transaction_id=provider_transaction_id,
         )
+        evidence_persistence_required = (
+            provider_result.evidence_persistence_required
+        )
+        if type(evidence_persistence_required) is not bool:
+            raise _InvalidProviderResult()
         age_eligibility = check_age_eligibility(
             birth_date=provider_result.birth_date,
             reference_date=action_time_utc.astimezone(
@@ -387,14 +399,39 @@ def complete_identity_verification(
             session.rollback()
         raise
 
-    if not _finalize_verified_completion(
-        session,
-        verification_session_id=verification_session_id,
-        claim_token=claim_token,
-        action_time=action_time_utc,
-        age_eligibility=age_eligibility,
-        identity_subject_digest=identity_subject_digest,
+    if (
+        evidence_persistence_required
+        and evidence_writer is None
     ):
+        _raise_finalization_failed_after_claim_cleanup(
+            session,
+            verification_session_id=verification_session_id,
+            claim_token=claim_token,
+            action_time=action_time_utc,
+        )
+
+    try:
+        finalized = _finalize_verified_completion(
+            session,
+            verification_session_id=verification_session_id,
+            claim_token=claim_token,
+            action_time=action_time_utc,
+            age_eligibility=age_eligibility,
+            identity_subject_digest=identity_subject_digest,
+            verified_identity_result=provider_result,
+            evidence_writer=(
+                evidence_writer if evidence_persistence_required else None
+            ),
+        )
+    except Exception:
+        _raise_finalization_failed_after_claim_cleanup(
+            session,
+            verification_session_id=verification_session_id,
+            claim_token=claim_token,
+            action_time=action_time_utc,
+        )
+
+    if not finalized:
         raise IdentityVerificationServiceError(
             IdentityVerificationServiceErrorCode.COMPLETION_CONFLICT
         )
@@ -493,6 +530,8 @@ def _finalize_verified_completion(
     action_time: datetime,
     age_eligibility: AgeEligibility,
     identity_subject_digest: str,
+    verified_identity_result: VerifiedIdentityResult | None = None,
+    evidence_writer: VerifiedIdentityEvidenceWriter | None = None,
 ) -> bool:
     result = session.execute(
         update(IdentityVerificationSession)
@@ -519,8 +558,46 @@ def _finalize_verified_completion(
         session.rollback()
         return False
 
+    if evidence_writer is not None:
+        verification_session = session.scalar(
+            select(IdentityVerificationSession).where(
+                IdentityVerificationSession.verification_session_id
+                == verification_session_id
+            ).execution_options(populate_existing=True)
+        )
+        evidence_writer.add_evidence(
+            session,
+            verification_session=verification_session,
+            verified_identity_result=verified_identity_result,
+            action_time=action_time,
+        )
+
+    session.flush()
     session.commit()
     return True
+
+
+def _raise_finalization_failed_after_claim_cleanup(
+    session,
+    *,
+    verification_session_id: str,
+    claim_token: str,
+    action_time: datetime,
+):
+    session.rollback()
+    try:
+        _release_completion_claim(
+            session,
+            verification_session_id=verification_session_id,
+            claim_token=claim_token,
+            action_time=action_time,
+        )
+    except Exception:
+        session.rollback()
+
+    raise IdentityVerificationServiceError(
+        IdentityVerificationServiceErrorCode.FINALIZATION_FAILED
+    ) from None
 
 
 def _release_completion_claim(

@@ -86,6 +86,12 @@ class VerifiedIdentityResult:
             value=self.identity_subject,
         )
 
+    @property
+    def evidence_persistence_required(self) -> bool:
+        """Tell orchestration whether verified finalization needs evidence."""
+
+        return False
+
 
 class IdentityVerificationProvider(ABC):
 

@@ -100,6 +100,7 @@ class IdentityVerificationProviderContractTest(unittest.TestCase):
         self.assertEqual(result.provider_transaction_id, "tx-sensitive-123")
         self.assertEqual(result.birth_date, date(2012, 10, 9))
         self.assertEqual(result.identity_subject, "identity-sensitive-456")
+        self.assertFalse(result.evidence_persistence_required)
         self.assertEqual(
             {item.name for item in fields(result)},
             {

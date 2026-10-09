@@ -188,6 +188,7 @@ class TossIdentityVerificationProviderTest(unittest.TestCase):
         )
         self.assertIsInstance(result, VerifiedIdentityResult)
         self.assertIs(type(result), TossVerifiedIdentityResult)
+        self.assertTrue(result.evidence_persistence_required)
 
     def test_toss_result_is_immutable(self):
         provider, _, _ = self.make_provider()

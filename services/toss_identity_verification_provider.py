@@ -69,6 +69,10 @@ class TossVerifiedIdentityResult(VerifiedIdentityResult):
         if not self.signature.strip():
             raise ValueError("signature must not be empty.")
 
+    @property
+    def evidence_persistence_required(self) -> bool:
+        return True
+
 
 class TossIdentityVerificationProvider(IdentityVerificationProvider):
     """Adapt Toss-specific clients to the provider-neutral contract."""

@@ -8,11 +8,16 @@ from pathlib import Path
 from uuid import UUID
 
 from flask_migrate import upgrade
-from sqlalchemy import create_engine, func, select, text, update
+from sqlalchemy import create_engine, event, func, select, text, update
 from sqlalchemy.orm import Session
 
 import app as app_module
-from models import IdentityVerificationSession, User, db
+from models import (
+    IdentityVerificationSession,
+    TossIdentityVerificationEvidence,
+    User,
+    db,
+)
 from services.age_eligibility_service import AgeEligibility
 from services.fake_identity_verification_provider import (
     FakeIdentityVerificationProvider,
@@ -34,9 +39,15 @@ from services.identity_verification_service import (
     complete_identity_verification,
     start_identity_verification,
 )
+from services.toss_identity_verification_evidence_writer import (
+    TossIdentityVerificationEvidenceWriter,
+)
+from services.toss_identity_verification_provider import (
+    TossVerifiedIdentityResult,
+)
 
 
-MIGRATION_HEAD = "f3a7c9e1b2d4"
+MIGRATION_HEAD = "d36d259b5fdf"
 MIGRATIONS_DIRECTORY = str(
     Path(__file__).resolve().parents[1] / "migrations"
 )
@@ -176,6 +187,7 @@ class IdentityVerificationServiceTest(unittest.TestCase):
         action_time=ACTION_TIME + timedelta(minutes=1),
         key=HMAC_KEY,
         claim_token=CLAIM_TOKEN,
+        evidence_writer=None,
     ):
         return complete_identity_verification(
             db.session,
@@ -186,12 +198,44 @@ class IdentityVerificationServiceTest(unittest.TestCase):
             action_time=action_time,
             identity_subject_hmac_key=key,
             claim_token_factory=lambda: claim_token,
+            evidence_writer=evidence_writer,
+        )
+
+    def make_toss_result_provider(
+        self,
+        *,
+        signature="toss-signature-sensitive",
+        **provider_options,
+    ):
+        def to_toss_result(result):
+            return TossVerifiedIdentityResult(
+                provider=result.provider,
+                provider_transaction_id=result.provider_transaction_id,
+                birth_date=result.birth_date,
+                identity_subject=result.identity_subject,
+                signature=signature,
+            )
+
+        return self.make_provider(
+            result_transform=to_toss_result,
+            **provider_options,
         )
 
     def get_session(self, public_id):
         db.session.expire_all()
         return db.session.scalar(
             select(IdentityVerificationSession).where(
+                IdentityVerificationSession.verification_session_id
+                == public_id
+            )
+        )
+
+    def get_evidence(self, public_id):
+        db.session.expire_all()
+        return db.session.scalar(
+            select(TossIdentityVerificationEvidence)
+            .join(IdentityVerificationSession)
+            .where(
                 IdentityVerificationSession.verification_session_id
                 == public_id
             )
@@ -551,6 +595,7 @@ class IdentityVerificationServiceTest(unittest.TestCase):
 
         self.assertEqual(first, second)
         self.assertEqual(provider.get_call_count, 1)
+        self.assertIsNone(self.get_evidence(started.verification_session_id))
 
     def test_atomic_claim_allows_only_one_database_session(self):
         provider = self.make_provider()
@@ -741,6 +786,7 @@ class IdentityVerificationServiceTest(unittest.TestCase):
         self.assertNotIn(started.provider_transaction_id, error_text)
         self.assertNotIn(OTHER_CLAIM_TOKEN, error_text)
         self.assertNotIn("CE3102", error_text)
+        self.assertIsNone(self.get_evidence(started.verification_session_id))
 
         provider.get_error = None
         result = self.complete(
@@ -807,6 +853,7 @@ class IdentityVerificationServiceTest(unittest.TestCase):
         self.assertEqual(stored.status, "failed")
         self.assertEqual(stored.failure_code, "verification_failed")
         self.assertIsNone(stored.completion_claim_token)
+        self.assertIsNone(self.get_evidence(started.verification_session_id))
 
     def test_age_restricted_becomes_terminal_age_requirement_failure(self):
         age_restricted = IdentityVerificationProviderError(
@@ -835,6 +882,7 @@ class IdentityVerificationServiceTest(unittest.TestCase):
         self.assertIsNone(stored.completion_claim_token)
         self.assertIsNone(stored.completion_claimed_at)
         self.assertEqual(provider.get_call_count, 1)
+        self.assertIsNone(self.get_evidence(started.verification_session_id))
 
         with self.assertRaises(IdentityVerificationServiceError) as repeated:
             self.complete(
@@ -1030,6 +1078,292 @@ class IdentityVerificationServiceTest(unittest.TestCase):
         self.assertNotIn(subject, error_text)
         self.assertNotIn("another-synthetic-secret", error_text)
         self.assertNotIn("provider-transaction", error_text)
+
+    def test_toss_success_atomically_persists_session_and_evidence(self):
+        provider = self.make_toss_result_provider()
+        writer = TossIdentityVerificationEvidenceWriter()
+        started = self.start(provider)
+        completion_time = ACTION_TIME + timedelta(minutes=1)
+
+        result = self.complete(
+            started,
+            provider,
+            action_time=completion_time,
+            evidence_writer=writer,
+        )
+
+        stored = self.get_session(started.verification_session_id)
+        evidence = self.get_evidence(started.verification_session_id)
+        self.assertEqual(result.status, "verified")
+        self.assertEqual(stored.status, "verified")
+        self.assertEqual(
+            stored.age_eligibility,
+            AgeEligibility.AGE_14_OR_OVER.value,
+        )
+        self.assertIsNotNone(stored.identity_subject_digest)
+        self.assertEqual(stored_as_utc(stored.verified_at), completion_time)
+        self.assertIsNone(stored.completion_claim_token)
+        self.assertIsNone(stored.completion_claimed_at)
+        self.assertIsNone(stored.failure_code)
+        self.assertIsNotNone(evidence)
+        self.assertEqual(
+            evidence.identity_verification_session_id,
+            stored.identity_verification_session_id,
+        )
+        self.assertEqual(
+            evidence.provider_transaction_id,
+            started.provider_transaction_id,
+        )
+        self.assertEqual(evidence.signature, "toss-signature-sensitive")
+        self.assertEqual(
+            stored_as_utc(evidence.created_at),
+            completion_time,
+        )
+
+    def test_atomic_finalize_has_no_commit_between_update_and_insert(self):
+        class CommitObservingWriter(
+            TossIdentityVerificationEvidenceWriter
+        ):
+            commit_count_at_insert = None
+
+            def add_evidence(writer_self, session, **kwargs):
+                writer_self.commit_count_at_insert = len(commit_events)
+                return super().add_evidence(session, **kwargs)
+
+        provider = self.make_toss_result_provider()
+        started = self.start(provider)
+        writer = CommitObservingWriter()
+        commit_events = []
+        underlying_session = db.session()
+
+        def record_commit(_session):
+            commit_events.append("commit")
+
+        event.listen(underlying_session, "after_commit", record_commit)
+        try:
+            self.complete(
+                started,
+                provider,
+                evidence_writer=writer,
+            )
+        finally:
+            event.remove(underlying_session, "after_commit", record_commit)
+
+        self.assertEqual(writer.commit_count_at_insert, 1)
+        self.assertEqual(commit_events, ["commit", "commit"])
+
+    def test_toss_result_without_writer_fails_closed_and_releases_claim(self):
+        provider = self.make_toss_result_provider()
+        started = self.start(provider)
+
+        with self.assertRaises(IdentityVerificationServiceError) as context:
+            self.complete(started, provider)
+
+        self.assertIs(
+            context.exception.code,
+            IdentityVerificationServiceErrorCode.FINALIZATION_FAILED,
+        )
+        stored = self.get_session(started.verification_session_id)
+        self.assertEqual(stored.status, "pending")
+        self.assertIsNone(stored.completion_claim_token)
+        self.assertIsNone(stored.completion_claimed_at)
+        self.assertIsNone(stored.identity_subject_digest)
+        self.assertIsNone(stored.verified_at)
+        self.assertIsNone(self.get_evidence(started.verification_session_id))
+        self.assertEqual(provider.get_call_count, 1)
+
+    def test_evidence_integrity_failure_rolls_back_verified_update(self):
+        class InvalidEvidenceWriter:
+            def add_evidence(
+                writer_self,
+                session,
+                *,
+                verification_session,
+                verified_identity_result,
+                action_time,
+            ):
+                session.add(
+                    TossIdentityVerificationEvidence(
+                        identity_verification_session_id=(
+                            verification_session
+                            .identity_verification_session_id
+                        ),
+                        provider_transaction_id=(
+                            verified_identity_result
+                            .provider_transaction_id
+                        ),
+                        signature="",
+                        created_at=action_time,
+                    )
+                )
+
+        provider = self.make_toss_result_provider()
+        started = self.start(provider)
+
+        with self.assertRaises(IdentityVerificationServiceError) as context:
+            self.complete(
+                started,
+                provider,
+                evidence_writer=InvalidEvidenceWriter(),
+            )
+
+        self.assertIs(
+            context.exception.code,
+            IdentityVerificationServiceErrorCode.FINALIZATION_FAILED,
+        )
+        stored = self.get_session(started.verification_session_id)
+        self.assertEqual(stored.status, "pending")
+        self.assertIsNone(stored.completion_claim_token)
+        self.assertIsNone(stored.identity_subject_digest)
+        self.assertIsNone(stored.verified_at)
+        self.assertIsNone(self.get_evidence(started.verification_session_id))
+
+    def test_existing_evidence_for_same_session_is_not_overwritten(self):
+        provider = self.make_toss_result_provider()
+        started = self.start(provider)
+        stored = self.get_session(started.verification_session_id)
+        existing = TossIdentityVerificationEvidence(
+            identity_verification_session_id=(
+                stored.identity_verification_session_id
+            ),
+            provider_transaction_id="existing-evidence-transaction",
+            signature="existing-signature",
+            created_at=ACTION_TIME,
+        )
+        db.session.add(existing)
+        db.session.commit()
+
+        with self.assertRaises(IdentityVerificationServiceError) as context:
+            self.complete(
+                started,
+                provider,
+                evidence_writer=TossIdentityVerificationEvidenceWriter(),
+            )
+
+        self.assertIs(
+            context.exception.code,
+            IdentityVerificationServiceErrorCode.FINALIZATION_FAILED,
+        )
+        stored = self.get_session(started.verification_session_id)
+        evidence = self.get_evidence(started.verification_session_id)
+        self.assertEqual(stored.status, "pending")
+        self.assertIsNone(stored.completion_claim_token)
+        self.assertEqual(
+            evidence.provider_transaction_id,
+            "existing-evidence-transaction",
+        )
+        self.assertEqual(evidence.signature, "existing-signature")
+
+    def test_duplicate_transaction_evidence_rolls_back_both_changes(self):
+        target_provider = self.make_toss_result_provider()
+        target = self.start(target_provider)
+        other_provider = self.make_provider()
+        other = self.start(other_provider)
+        other_session = self.get_session(other.verification_session_id)
+        existing = TossIdentityVerificationEvidence(
+            identity_verification_session_id=(
+                other_session.identity_verification_session_id
+            ),
+            provider_transaction_id=target.provider_transaction_id,
+            signature="existing-signature",
+            created_at=ACTION_TIME,
+        )
+        db.session.add(existing)
+        db.session.commit()
+
+        with self.assertRaises(IdentityVerificationServiceError) as context:
+            self.complete(
+                target,
+                target_provider,
+                evidence_writer=TossIdentityVerificationEvidenceWriter(),
+            )
+
+        self.assertIs(
+            context.exception.code,
+            IdentityVerificationServiceErrorCode.FINALIZATION_FAILED,
+        )
+        target_session = self.get_session(target.verification_session_id)
+        self.assertEqual(target_session.status, "pending")
+        self.assertIsNone(target_session.completion_claim_token)
+        self.assertIsNone(self.get_evidence(target.verification_session_id))
+        self.assertEqual(
+            db.session.scalar(
+                select(func.count()).select_from(
+                    TossIdentityVerificationEvidence
+                )
+            ),
+            1,
+        )
+
+    def test_lost_claim_never_inserts_evidence_or_finalizes_session(self):
+        started_holder = {}
+
+        def replace_claim(_provider_transaction_id):
+            with Session(self.test_engine) as competing_session:
+                competing_session.execute(
+                    update(IdentityVerificationSession)
+                    .where(
+                        IdentityVerificationSession.verification_session_id
+                        == started_holder["result"].verification_session_id
+                    )
+                    .values(
+                        completion_claim_token=OTHER_CLAIM_TOKEN,
+                        completion_claimed_at=(
+                            ACTION_TIME + timedelta(minutes=1)
+                        ),
+                    )
+                    .execution_options(synchronize_session=False)
+                )
+                competing_session.commit()
+
+        provider = self.make_toss_result_provider(before_get=replace_claim)
+        started = self.start(provider)
+        started_holder["result"] = started
+
+        with self.assertRaises(IdentityVerificationServiceError) as context:
+            self.complete(
+                started,
+                provider,
+                evidence_writer=TossIdentityVerificationEvidenceWriter(),
+            )
+
+        self.assertIs(
+            context.exception.code,
+            IdentityVerificationServiceErrorCode.COMPLETION_CONFLICT,
+        )
+        stored = self.get_session(started.verification_session_id)
+        self.assertEqual(stored.status, "pending")
+        self.assertEqual(stored.completion_claim_token, OTHER_CLAIM_TOKEN)
+        self.assertIsNone(stored.identity_subject_digest)
+        self.assertIsNone(self.get_evidence(started.verification_session_id))
+
+    def test_verified_toss_completion_is_idempotent_without_reinsert(self):
+        provider = self.make_toss_result_provider()
+        writer = TossIdentityVerificationEvidenceWriter()
+        started = self.start(provider)
+        first = self.complete(
+            started,
+            provider,
+            evidence_writer=writer,
+        )
+
+        second = self.complete(
+            started,
+            provider,
+            claim_token=OTHER_CLAIM_TOKEN,
+            evidence_writer=writer,
+        )
+
+        self.assertEqual(second, first)
+        self.assertEqual(provider.get_call_count, 1)
+        self.assertEqual(
+            db.session.scalar(
+                select(func.count()).select_from(
+                    TossIdentityVerificationEvidence
+                )
+            ),
+            1,
+        )
 
     def test_orchestration_does_not_create_users_or_consume_verified_session(self):
         provider = self.make_provider()
