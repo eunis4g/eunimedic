@@ -12,6 +12,7 @@ from models import IdentityVerificationSession, db
 
 BASE_REVISION = "d9e7b4c2a1f6"
 IDENTITY_VERIFICATION_REVISION = "f3a7c9e1b2d4"
+PROJECT_HEAD_REVISION = "d36d259b5fdf"
 MIGRATIONS_DIRECTORY = str(
     Path(__file__).resolve().parents[1] / "migrations"
 )
@@ -743,6 +744,10 @@ class IdentityVerificationSchemaTest(unittest.TestCase):
         self._assert_database_is_healthy()
 
         self._upgrade()
+        upgrade(
+            directory=MIGRATIONS_DIRECTORY,
+            revision=PROJECT_HEAD_REVISION,
+        )
         self.assertEqual(self._read_seed_user(), user_before)
         self.assertIn(
             "identity_verification_sessions",

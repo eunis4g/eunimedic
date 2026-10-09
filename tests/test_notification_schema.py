@@ -20,7 +20,7 @@ from models import (
 
 BASE_REVISION = "c6f4a2d9e8b1"
 NOTIFICATION_REVISION = "d9e7b4c2a1f6"
-PROJECT_HEAD_REVISION = "f3a7c9e1b2d4"
+PROJECT_HEAD_REVISION = "d36d259b5fdf"
 MIGRATIONS_DIRECTORY = str(
     Path(__file__).resolve().parents[1] / "migrations"
 )

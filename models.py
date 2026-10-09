@@ -440,6 +440,59 @@ class IdentityVerificationSession(db.Model):
     )
 
 
+class TossIdentityVerificationEvidence(db.Model):
+    __tablename__ = "toss_identity_verification_evidence"
+
+    toss_identity_verification_evidence_id = db.Column(
+        db.Integer,
+        primary_key=True,
+    )
+    identity_verification_session_id = db.Column(
+        db.Integer,
+        db.ForeignKey(
+            "identity_verification_sessions.identity_verification_session_id",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    provider_transaction_id = db.Column(
+        db.String(255),
+        nullable=False,
+    )
+    signature = db.Column(
+        db.Text,
+        nullable=False,
+    )
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=utc_now,
+    )
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            "identity_verification_session_id",
+            name="uq_toss_identity_evidence_session",
+        ),
+        db.UniqueConstraint(
+            "provider_transaction_id",
+            name="uq_toss_identity_evidence_transaction",
+        ),
+        db.CheckConstraint(
+            "length(provider_transaction_id) > 0",
+            name="ck_toss_identity_evidence_transaction_not_empty",
+        ),
+        db.CheckConstraint(
+            "length(signature) > 0",
+            name="ck_toss_identity_evidence_signature_not_empty",
+        ),
+    )
+
+    identity_verification_session = db.relationship(
+        "IdentityVerificationSession",
+    )
+
+
 class Medicine(db.Model):
     __tablename__ = "medicines"
 
