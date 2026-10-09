@@ -85,6 +85,14 @@ from services.medication_schedule_service import (
     normalize_medication_times,
     validate_plan_capacity,
 )
+from routes.api_v1 import (
+    API_V1_DEPENDENCIES_EXTENSION_KEY,
+    api_v1_blueprint,
+)
+from services.toss_identity_verification_wiring import (
+    build_toss_identity_verification_dependencies,
+    read_toss_identity_verification_config,
+)
 from notification_cli import register_notification_cli
 
 
@@ -127,6 +135,14 @@ app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 db.init_app(app)
 migrate = Migrate(app, db)
 register_notification_cli(app)
+
+app.extensions[API_V1_DEPENDENCIES_EXTENSION_KEY] = (
+    build_toss_identity_verification_dependencies(
+        read_toss_identity_verification_config(os.environ)
+    )
+)
+csrf.exempt(api_v1_blueprint)
+app.register_blueprint(api_v1_blueprint)
 
 
 @login_manager.user_loader

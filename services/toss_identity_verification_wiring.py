@@ -1,5 +1,8 @@
+from base64 import b64decode
+from binascii import Error as BinasciiError
 from dataclasses import dataclass, field
 from datetime import timedelta
+from enum import Enum
 import math
 
 from services.toss_cert_access_token_client import TossCertAccessTokenClient
@@ -16,6 +19,25 @@ from services.toss_identity_verification_result_client import (
 from services.toss_identity_verification_start_client import (
     TossIdentityVerificationStartClient,
 )
+
+
+class TossIdentityVerificationConfigurationErrorCode(str, Enum):
+    MISSING_CONFIGURATION = "MISSING_CONFIGURATION"
+    INVALID_CONFIGURATION = "INVALID_CONFIGURATION"
+    INVALID_HMAC_KEY = "INVALID_HMAC_KEY"
+
+
+class TossIdentityVerificationConfigurationError(RuntimeError):
+    """A stable configuration error that never includes secret values."""
+
+    def __init__(self, code: TossIdentityVerificationConfigurationErrorCode):
+        if type(code) is not TossIdentityVerificationConfigurationErrorCode:
+            raise TypeError(
+                "code must be a "
+                "TossIdentityVerificationConfigurationErrorCode value."
+            )
+        self.code = code
+        super().__init__(code.value)
 
 
 @dataclass(frozen=True)
@@ -79,6 +101,57 @@ class TossIdentityVerificationDependencies:
         _validate_hmac_key(self.identity_subject_hmac_key)
 
 
+def read_toss_identity_verification_config(
+    environ,
+) -> TossIdentityVerificationConfig:
+    """Read and validate the process-level Toss configuration boundary."""
+
+    client_id = _read_required_value(environ, "TOSS_CERT_CLIENT_ID")
+    client_secret = _read_required_value(
+        environ,
+        "TOSS_CERT_CLIENT_SECRET",
+    )
+    request_url = _read_required_value(
+        environ,
+        "TOSS_IDENTITY_REQUEST_URL",
+    )
+    rsa_public_key_base64 = _read_required_value(
+        environ,
+        "TOSS_CERT_RSA_PUBLIC_KEY_BASE64",
+    )
+    http_timeout = _read_seconds(
+        environ,
+        "TOSS_HTTP_TIMEOUT_SECONDS",
+        allow_zero=False,
+    )
+    token_refresh_skew_seconds = _read_seconds(
+        environ,
+        "TOSS_TOKEN_REFRESH_SKEW_SECONDS",
+        allow_zero=True,
+    )
+    identity_subject_hmac_key = _read_hmac_key(environ)
+
+    try:
+        token_refresh_skew = timedelta(
+            seconds=token_refresh_skew_seconds
+        )
+    except OverflowError:
+        raise TossIdentityVerificationConfigurationError(
+            TossIdentityVerificationConfigurationErrorCode
+            .INVALID_CONFIGURATION
+        ) from None
+
+    return TossIdentityVerificationConfig(
+        client_id=client_id,
+        client_secret=client_secret,
+        request_url=request_url,
+        rsa_public_key_base64=rsa_public_key_base64,
+        http_timeout=http_timeout,
+        token_refresh_skew=token_refresh_skew,
+        identity_subject_hmac_key=identity_subject_hmac_key,
+    )
+
+
 def build_toss_identity_verification_dependencies(
     config: TossIdentityVerificationConfig,
     *,
@@ -136,3 +209,51 @@ def _validate_hmac_key(value):
         raise TypeError("identity_subject_hmac_key must be bytes.")
     if not value:
         raise ValueError("identity_subject_hmac_key must not be empty.")
+
+
+def _read_required_value(environ, name):
+    value = environ.get(name)
+    if not isinstance(value, str) or not value.strip():
+        raise TossIdentityVerificationConfigurationError(
+            TossIdentityVerificationConfigurationErrorCode
+            .MISSING_CONFIGURATION
+        )
+    return value
+
+
+def _read_seconds(environ, name, *, allow_zero):
+    raw_value = _read_required_value(environ, name)
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        raise TossIdentityVerificationConfigurationError(
+            TossIdentityVerificationConfigurationErrorCode
+            .INVALID_CONFIGURATION
+        ) from None
+
+    minimum_is_valid = value >= 0 if allow_zero else value > 0
+    if not math.isfinite(value) or not minimum_is_valid:
+        raise TossIdentityVerificationConfigurationError(
+            TossIdentityVerificationConfigurationErrorCode
+            .INVALID_CONFIGURATION
+        )
+    return value
+
+
+def _read_hmac_key(environ):
+    encoded_key = _read_required_value(
+        environ,
+        "IDENTITY_SUBJECT_HMAC_KEY_BASE64",
+    )
+    try:
+        decoded_key = b64decode(encoded_key, validate=True)
+    except (BinasciiError, UnicodeEncodeError, ValueError):
+        raise TossIdentityVerificationConfigurationError(
+            TossIdentityVerificationConfigurationErrorCode.INVALID_HMAC_KEY
+        ) from None
+
+    if not decoded_key:
+        raise TossIdentityVerificationConfigurationError(
+            TossIdentityVerificationConfigurationErrorCode.INVALID_HMAC_KEY
+        )
+    return decoded_key
