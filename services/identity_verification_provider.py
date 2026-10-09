@@ -12,6 +12,7 @@ class IdentityVerificationProviderErrorCode(str, Enum):
     PROVIDER_UNAVAILABLE = "PROVIDER_UNAVAILABLE"
     INVALID_PROVIDER_RESPONSE = "INVALID_PROVIDER_RESPONSE"
     VERIFICATION_PENDING = "VERIFICATION_PENDING"
+    AGE_RESTRICTED = "AGE_RESTRICTED"
     VERIFICATION_FAILED = "VERIFICATION_FAILED"
     VERIFICATION_EXPIRED = "VERIFICATION_EXPIRED"
 
@@ -23,6 +24,8 @@ _ERROR_MESSAGES = {
         "The identity verification provider returned an invalid response.",
     IdentityVerificationProviderErrorCode.VERIFICATION_PENDING:
         "Identity verification is not completed yet.",
+    IdentityVerificationProviderErrorCode.AGE_RESTRICTED:
+        "The identity verification provider rejected the age requirement.",
     IdentityVerificationProviderErrorCode.VERIFICATION_FAILED:
         "Identity verification failed.",
     IdentityVerificationProviderErrorCode.VERIFICATION_EXPIRED:

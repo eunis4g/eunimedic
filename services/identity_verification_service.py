@@ -43,6 +43,7 @@ class IdentityVerificationServiceErrorCode(str, Enum):
     SESSION_CONSUMED = "SESSION_CONSUMED"
     PROVIDER_UNAVAILABLE = "PROVIDER_UNAVAILABLE"
     VERIFICATION_NOT_COMPLETED = "VERIFICATION_NOT_COMPLETED"
+    AGE_REQUIREMENT_NOT_MET = "AGE_REQUIREMENT_NOT_MET"
     VERIFICATION_FAILED = "VERIFICATION_FAILED"
     VERIFICATION_EXPIRED = "VERIFICATION_EXPIRED"
     INVALID_PROVIDER_RESPONSE = "INVALID_PROVIDER_RESPONSE"
@@ -65,6 +66,8 @@ _ERROR_MESSAGES = {
         "The identity verification provider is unavailable.",
     IdentityVerificationServiceErrorCode.VERIFICATION_NOT_COMPLETED:
         "Identity verification is not completed yet.",
+    IdentityVerificationServiceErrorCode.AGE_REQUIREMENT_NOT_MET:
+        "The identity verification age requirement was not met.",
     IdentityVerificationServiceErrorCode.VERIFICATION_FAILED:
         "Identity verification failed.",
     IdentityVerificationServiceErrorCode.VERIFICATION_EXPIRED:
@@ -953,6 +956,8 @@ def _service_code_for_provider_error(code):
             IdentityVerificationServiceErrorCode.INVALID_PROVIDER_RESPONSE,
         IdentityVerificationProviderErrorCode.VERIFICATION_PENDING:
             IdentityVerificationServiceErrorCode.VERIFICATION_NOT_COMPLETED,
+        IdentityVerificationProviderErrorCode.AGE_RESTRICTED:
+            IdentityVerificationServiceErrorCode.AGE_REQUIREMENT_NOT_MET,
         IdentityVerificationProviderErrorCode.VERIFICATION_FAILED:
             IdentityVerificationServiceErrorCode.VERIFICATION_FAILED,
         IdentityVerificationProviderErrorCode.VERIFICATION_EXPIRED:
@@ -969,6 +974,9 @@ def _service_code_for_stored_failure(failure_code, *, fallback):
         "invalid_provider_response": (
             IdentityVerificationServiceErrorCode.INVALID_PROVIDER_RESPONSE
         ),
+        "age_restricted": (
+            IdentityVerificationServiceErrorCode.AGE_REQUIREMENT_NOT_MET
+        ),
         "verification_failed": (
             IdentityVerificationServiceErrorCode.VERIFICATION_FAILED
         ),
@@ -983,4 +991,6 @@ def _service_code_for_stored_failure(failure_code, *, fallback):
 
 
 def _stored_failure_code(code):
+    if code is IdentityVerificationServiceErrorCode.AGE_REQUIREMENT_NOT_MET:
+        return "age_restricted"
     return code.value.lower()

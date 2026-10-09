@@ -167,6 +167,7 @@ class IdentityVerificationProviderContractTest(unittest.TestCase):
                 "PROVIDER_UNAVAILABLE",
                 "INVALID_PROVIDER_RESPONSE",
                 "VERIFICATION_PENDING",
+                "AGE_RESTRICTED",
                 "VERIFICATION_FAILED",
                 "VERIFICATION_EXPIRED",
             },

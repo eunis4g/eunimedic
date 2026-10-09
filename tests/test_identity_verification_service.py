@@ -808,6 +808,47 @@ class IdentityVerificationServiceTest(unittest.TestCase):
         self.assertEqual(stored.failure_code, "verification_failed")
         self.assertIsNone(stored.completion_claim_token)
 
+    def test_age_restricted_becomes_terminal_age_requirement_failure(self):
+        age_restricted = IdentityVerificationProviderError(
+            IdentityVerificationProviderErrorCode.AGE_RESTRICTED
+        )
+        provider = self.make_provider(get_error=age_restricted)
+        started = self.start(provider)
+
+        with self.assertRaises(IdentityVerificationServiceError) as context:
+            self.complete(started, provider)
+
+        self.assertIs(
+            context.exception.code,
+            IdentityVerificationServiceErrorCode.AGE_REQUIREMENT_NOT_MET,
+        )
+        stored = self.get_session(started.verification_session_id)
+        self.assertEqual(stored.status, "failed")
+        self.assertEqual(stored.failure_code, "age_restricted")
+        self.assertEqual(
+            stored.provider_transaction_id,
+            started.provider_transaction_id,
+        )
+        self.assertIsNone(stored.age_eligibility)
+        self.assertIsNone(stored.identity_subject_digest)
+        self.assertIsNone(stored.verified_at)
+        self.assertIsNone(stored.completion_claim_token)
+        self.assertIsNone(stored.completion_claimed_at)
+        self.assertEqual(provider.get_call_count, 1)
+
+        with self.assertRaises(IdentityVerificationServiceError) as repeated:
+            self.complete(
+                started,
+                provider,
+                claim_token=OTHER_CLAIM_TOKEN,
+            )
+
+        self.assertIs(
+            repeated.exception.code,
+            IdentityVerificationServiceErrorCode.AGE_REQUIREMENT_NOT_MET,
+        )
+        self.assertEqual(provider.get_call_count, 1)
+
     def test_provider_expiry_becomes_expired_and_releases_claim(self):
         provider = self.make_provider(
             verification_error_code=(
